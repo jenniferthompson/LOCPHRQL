@@ -1,0 +1,254 @@
+---
+title: "Level of Consciousness vs Physical HRQOL"
+author: "Jennifer Thompson, MPH<br>Supervisor: Rameela Chandrasekhar, PhD"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  tufte::tufte_html:
+    tufte_variant: "envisioned"
+    toc: TRUE
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(knitr)
+library(tidyverse)
+library(stringr)
+library(glue)
+library(kableExtra)
+library(rms)
+
+load("data/brainmind_deid.Rdata")
+
+sum_na <- partial(sum, na.rm = TRUE)
+
+```
+
+The following analyses use data from the BRAIN-ICU and MIND-ICU cohorts to
+examine the association between level of consciousness (LOC) during critical
+illness and long-term disability, physical health-related quality of life
+(pHRQOL), and mortality at 3 and 12 months following hospital discharge.
+
+Throughout the analysis, level of consciousness (LOC) is measured using the Richmond Agitation-Sedation Scale (RASS). The RASS was performed by research
+staff twice daily in the ICU and once daily outside the ICU during the
+hospitalizations recorded in the parent studies.
+
+# Study Aims
+
+## Aim 1
+
+We hypothesize that lower LOC during critical illness is associated with greater
+disability and worsened physical health-related quality of life at 3 and 12
+months after hospital discharge, after adjusting for other baseline and
+hospitalization characteristics.
+
+### Exposure Definition, Aim 1
+
+lorem ipsum
+
+## Aim 2
+
+### Exposure Definition, Aim 2
+
+lorem ipsum
+
+## Outcome Definitions
+
+For both aims, outcomes include the following, measured at 3 and 12 months
+following hospital discharge:
+
+- **Disability**
+    - Katz Activities of Daily Living (ADL)
+    - Pfeffer Functional Activities Questionnaire (FAQ)
+    - Discharge destination (home vs facility)
+- **Physical HRQOL**: Short Form-36 Physical Component Score (PCS)
+- **Mortality**: Time to death at 90 and 365 days after discharge
+
+# Study Cohort
+
+Analyses will include all ICU survivors who were alive and remained in the study
+(ie, had not withdrawn) at the specified time point. Patients who died or
+officially withdrew from the study prior to assessment are not included in analyses at that time point. Missing data for individual assessments will be
+handled via multiple imputation (discussed in further detail in Methods).
+
+```{r consort_df}
+## -- Determine status at each follow-up point ---------------------------------
+fu_wide <- brainmind.fu %>%
+  dplyr::select(id, fu.period, status) %>%
+  filter(fu.period %in% paste(c(3, 12), "Month")) %>%
+  mutate(
+    ## Make ID character for compatibility with exclusion log
+    id = as.character(id),
+    fu.period = str_remove(fu.period, " Month"),
+    status = forcats::fct_collapse(
+      status,
+      "Alive and in study" = c(
+        "Living", "Living-Active in the study",
+        "Lost to Follow-Up - Case Closed", "Visit Not Completed",
+        "Still Trying to Contact"
+      ),
+      "Died before follow-up" = "Deceased",
+      "Withdrew before follow-up" = "Living-Withdrew from the study"
+    ),
+    status = as.character(status)
+  ) %>%
+  spread(key = fu.period, value = status, sep = ".") %>%
+  set_names(gsub("^fu\\.period", "status", names(.)))
+
+screened_df <- bind_rows(
+  brainmind.exc %>%
+    mutate(
+      id = paste(site, ex.id, sep = "-"),
+      exc_status = case_when(
+        stringr::str_sub(exc.rsn, 1, 2) == "9." ~ "Refused consent",
+        TRUE                                    ~ "Excluded"
+      )
+    ) %>%
+    dplyr::select(id, exc_status),
+  brainmind.oneobs %>%
+    dplyr::select(id, studywd.amt, died.inhosp) %>%
+    mutate(
+      id = as.character(id),
+      exc_status = "Enrolled",
+      wd_data = studywd.amt %in% c(
+        "2. W/D from Participation and All Data Collected",
+        "4. N/A Study Staff Withdrew Patient"
+      ) | id == 14015 ## withdrew data, but staff did not record appropriately
+    )
+) %>%
+  mutate(
+    dc_status = factor(
+      case_when(
+        !is.na(died.inhosp) & died.inhosp == "Died in hospital" ~ 1,
+        !is.na(studywd.amt)                                     ~ 2,
+        !(exc_status == "Enrolled")                             ~ as.numeric(NA),
+        TRUE                                                    ~ 3
+      ),
+      levels = 1:3,
+      labels = c(
+        "Died during hospitalization",
+        "Withdrew during hospitalization",
+        "ICU survivor"
+      )
+    )
+  ) %>%
+  left_join(fu_wide, by = "id") %>%
+  ## Fill in missing statuses
+  mutate(
+    ## Assume missing at 3m indicates no follow-up but patient still alive and
+    ##  in study (no death or withdrawal recorded)
+    status.3 = case_when(
+      !is.na(status.3) ~ status.3,
+      exc_status != "Enrolled" |
+        dc_status != "ICU survivor" ~
+        as.character(NA),
+      TRUE ~ "Alive and in study"
+    ),
+    ## 12m status is NA if patient died or withdrew before 3m; otherwise, if
+    ##  missing, assume patient was alive and in study (no death/withdrawal rec.)
+    status.12 = case_when(
+      exc_status != "Enrolled" |
+        dc_status != "ICU survivor" |
+        status.3 %in% paste(c("Died", "Withdrew"), "before follow-up") ~
+          as.character(NA),
+      !is.na(status.12) ~ status.12,
+      TRUE ~ "Alive and in study"
+    )
+  )
+
+## -- IDs of patients in discharge, 3m, 12m cohorts ----------------------------
+ids_discharge <- screened_df %>% filter(dc_status == "ICU survivor") %>% pull(id)
+ids_3m <- screened_df %>% filter(status.3 == "Alive and in study") %>% pull(id)
+ids_12m <- screened_df %>% filter(status.12 == "Alive and in study") %>% pull(id)
+
+## -- Combine info for CONSORT table -------------------------------------------
+consort_screen <- tribble(
+  ~ current, ~ npts, ~ denom,
+  "Screened", nrow(screened_df), NA,
+  "Excluded", sum_na(screened_df$exc_status == "Excluded"), nrow(screened_df),
+  "Approached", sum_na(screened_df$exc_status %in% c("Enrolled", "Refused consent")), nrow(screened_df),
+  "Refused consent", sum_na(screened_df$exc_status == "Refused consent"),
+    sum_na(screened_df$exc_status %in% c("Enrolled", "Refused consent")),
+  "Enrolled", sum_na(screened_df$exc_status == "Enrolled"),
+    sum_na(screened_df$exc_status %in% c("Enrolled", "Refused consent")),
+  "Withdrew all data", sum_na(screened_df$wd_data),
+    sum_na(screened_df$exc_status == "Enrolled"),
+  "Eligible for in-hospital assessments", sum_na(!screened_df$wd_data),
+    sum_na(screened_df$exc_status == "Enrolled")
+)
+
+n_elig_hosp <- sum_na(!screened_df$wd_data)
+
+consort_inhosp <- tribble(
+  ~ current, ~ npts,
+  "Died in hospital",
+    sum_na(screened_df$dc_status == "Died during hospitalization"),
+  "Withdrew in hospital",
+    sum_na(screened_df$dc_status == "Withdrew during hospitalization"),
+  "Discharged, remained in study",
+    sum_na(screened_df$dc_status == "ICU survivor")
+) %>%
+  mutate(denom = n_elig_hosp)
+
+n_elig_dc <- sum_na(screened_df$dc_status == "ICU survivor")
+
+## -- 3m followup section ------------------------------------------------------
+consort_3m <- tribble(
+  ~ current,                            ~ npts,
+  "Alive and in study at discharge",
+    sum_na(screened_df$dc_status == "ICU survivor"),
+  "Died before 3m follow-up",
+    sum_na(screened_df$status.3 == "Died before follow-up"),
+  "Withdrew before 3m follow-up",
+    sum_na(screened_df$status.3 == "Withdrew before follow-up"),
+  "Included in 3m follow-up cohort",
+    sum_na(screened_df$status.3 == "Alive and in study")
+) %>%
+  mutate(denom = n_elig_dc)
+
+n_elig_3m <- sum_na(screened_df$status.3 == "Alive and in study")
+
+## -- 12m followup section -----------------------------------------------------
+consort_12m <- tribble(
+  ~ current,                            ~ npts,
+  "Alive and in study at 3m follow-up",
+    sum_na(screened_df$status.3 == "Alive and in study"),
+  "Died before 12m follow-up",
+    sum_na(screened_df$status.12 == "Died before follow-up"),
+  "Withdrew before 12m follow-up",
+    sum_na(screened_df$status.12 == "Withdrew before follow-up"),
+  "Included in 12m follow-up cohort",
+    sum_na(screened_df$status.12 == "Alive and in study")
+) %>%
+  mutate(denom = n_elig_3m)
+
+consort_info <- bind_rows(
+  consort_screen, consort_inhosp, consort_3m, consort_12m
+) %>%
+  mutate(
+    denom = ifelse(
+      current %in%
+        paste("Alive and in study at", c("discharge", "3m follow-up")),
+      NA,
+      denom
+    ),
+    prop = round(npts / denom, 2),
+    npct = glue::glue("{npts} ({scales::percent(prop)})"),
+    npct = stringr::str_remove(npct, " \\(NA\\%\\)")
+)
+
+consort_info %>%
+  dplyr::select(current, npct) %>%
+  kable(
+    format = "html", col.names = c("", "N (%)"), align = c("l", "r"),
+    escape = FALSE
+  ) %>%
+  group_rows("Screening", 1, 7) %>%
+  group_rows("In-Hospital", 8, 10) %>%
+  group_rows("Three-Month Follow-Up", 11, 14) %>%
+  group_rows("Twelve-Month Follow-Up", 15, 18) %>%
+  row_spec(row = c(7, 10, 14, 18), bold = TRUE) %>%
+  kable_styling(full_width = FALSE, position = "left")
+
+```
