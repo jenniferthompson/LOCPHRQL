@@ -6,8 +6,12 @@ output:
   tufte::tufte_html:
     tufte_variant: "envisioned"
     toc: TRUE
-    toc_depth: 2
+    toc_depth: 1
 ---
+
+<style>
+.plotlymargin { margin-right: 0; }
+</style>
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
@@ -17,60 +21,27 @@ library(tidyverse)
 library(stringr)
 library(glue)
 library(kableExtra)
+library(tableone)
 library(rms)
+library(naniar)
+library(plotly)
 
 load("data/brainmind_deid.Rdata")
 
+## Source helper functions
+source("R/helpers.R")
 sum_na <- partial(sum, na.rm = TRUE)
 
+## How many imputations for multiple imputation?
+n_imp <- 15
+
+## -- Remove variable labels (don't play nicely with pipes) --------------------
+brainmind.oneobs <- clear.labels(brainmind.oneobs)
+brainmind.daily <- clear.labels(brainmind.daily)
+brainmind.fu <- clear.labels(brainmind.fu)
+brainmind.exc <- clear.labels(brainmind.exc)
+
 ```
-
-The following analyses use data from the BRAIN-ICU and MIND-ICU cohorts to
-examine the association between level of consciousness (LOC) during critical
-illness and long-term disability, physical health-related quality of life
-(pHRQOL), and mortality at 3 and 12 months following hospital discharge.
-
-Throughout the analysis, level of consciousness (LOC) is measured using the Richmond Agitation-Sedation Scale (RASS). The RASS was performed by research
-staff twice daily in the ICU and once daily outside the ICU during the
-hospitalizations recorded in the parent studies.
-
-# Study Aims
-
-## Aim 1
-
-We hypothesize that lower LOC during critical illness is associated with greater
-disability and worsened physical health-related quality of life at 3 and 12
-months after hospital discharge, after adjusting for other baseline and
-hospitalization characteristics.
-
-### Exposure Definition, Aim 1
-
-lorem ipsum
-
-## Aim 2
-
-### Exposure Definition, Aim 2
-
-lorem ipsum
-
-## Outcome Definitions
-
-For both aims, outcomes include the following, measured at 3 and 12 months
-following hospital discharge:
-
-- **Disability**
-    - Katz Activities of Daily Living (ADL)
-    - Pfeffer Functional Activities Questionnaire (FAQ)
-    - Discharge destination (home vs facility)
-- **Physical HRQOL**: Short Form-36 Physical Component Score (PCS)
-- **Mortality**: Time to death at 90 and 365 days after discharge
-
-# Study Cohort
-
-Analyses will include all ICU survivors who were alive and remained in the study
-(ie, had not withdrawn) at the specified time point. Patients who died or
-officially withdrew from the study prior to assessment are not included in analyses at that time point. Missing data for individual assessments will be
-handled via multiple imputation (discussed in further detail in Methods).
 
 ```{r consort_df}
 ## -- Determine status at each follow-up point ---------------------------------
@@ -238,6 +209,269 @@ consort_info <- bind_rows(
     npct = stringr::str_remove(npct, " \\(NA\\%\\)")
 )
 
+```
+
+```{r data_prep}
+## -- Calculate AUC for lowest daily RASSes (exposure) -------------------------
+## "AUC" = amount of "low LOC" each patient experienced in the hospital
+## Very, very few research RASSes were >0; combine these with 0
+rass_auc <- brainmind.daily %>%
+  mutate(
+    on_sedation = rcvd.benz | rcvd.op | rcvd.prop | rcvd.dex
+  ) %>%
+  filter(!is.na(mental.stat.imp), !is.na(on_sedation))
+
+
+
+## -- Minor data management for baseline/hospital characteristics --------------
+brainmind.oneobs <- brainmind.oneobs %>%
+  mutate(
+    frailty.e = as.numeric(stringr::str_sub(frailty, 1, 1)),
+    hosp.type = factor(
+      as.numeric(id >= 14000), levels = 0:1, labels = c("Civilian", "Veteran")
+    ),
+    dc.facility = factor(
+      as.numeric(!hospdis.loc == "Home"),
+      levels = 0:1, labels = c("Home", "Facility")
+    ),
+    ## For covariates, patients who were never on MV need 0 imputed for vent LOS
+    vent.los.all = ifelse(!is.na(vent.los.tot), vent.los.tot, 0)
+  )
+
+oneobs_covars <- c(
+  "age.enroll", "sex.pp", "race.wb", "bmi", "edu", "charlson.score", "frailty",
+  "faq.e", "hosp.type", "mean.modsofa.icu", "icudays.sevseptic.s",
+  "vent.los.all", "hosp.los"
+)
+
+exposure_vars <- c()
+
+outcome_vars <- c(
+  "dc.facility",
+  paste(c("adl", "faq", "sf36.pcs"), c(rep(3, 3), rep(12, 3)), sep = ".")
+)
+
+## -- Add outcome scores at each time point ------------------------------------
+fu_subset <- brainmind.fu %>%
+  filter(fu.period %in% paste(c(3, 12), "Month")) %>%
+  dplyr::select(id, fu.period, adl.totscore, faq.totscore, sf36.pcs) %>%
+  gather(key = test_name, value = test_score, -c(id, fu.period)) %>%
+  mutate(
+    fu.period = str_remove(fu.period, " Month"),
+    test_name = str_remove(test_name, "\\.totscore")
+  ) %>%
+  unite(test_name, c(test_name, fu.period), sep = ".") %>%
+  spread(key = test_name, value = test_score)
+
+## -- Create datasets for patients, variables needed at each time point --------
+df_full <- brainmind.oneobs %>% left_join(fu_subset, by = "id")
+
+df_discharge <- df_full %>%
+  filter(id %in% ids_discharge) %>%
+  dplyr::select(id, one_of(oneobs_covars), dc.facility) #one_of(exposure_vars), 
+
+df_3m <- df_full %>%
+  filter(id %in% ids_3m) %>%
+  dplyr::select(
+    id,
+    one_of(oneobs_covars),
+    one_of(str_subset(names(fu_subset), "\\.3"))
+  ) #one_of(exposure_vars), 
+
+df_12m <- df_full %>%
+  filter(id %in% ids_12m) %>%
+  dplyr::select(
+    id,
+    one_of(oneobs_covars),
+    one_of(str_subset(names(fu_subset), "\\.12"))
+  ) #one_of(exposure_vars), 
+
+```
+
+The following analyses use data from the BRAIN-ICU and MIND-ICU cohorts to
+examine the association between level of consciousness (LOC) during critical
+illness and long-term disability, physical health-related quality of life
+(pHRQOL), and mortality at 3 and 12 months following hospital discharge.
+
+Throughout the analysis, level of consciousness (LOC) is measured using the Richmond Agitation-Sedation Scale (RASS). The RASS was performed by research
+staff twice daily in the ICU and once daily outside the ICU during the
+hospitalizations recorded in the parent studies.
+
+# Study Aims
+
+## Aim 1
+
+We hypothesize that lower LOC during critical illness is associated with greater
+disability and worsened physical health-related quality of life at 3 and 12
+months after hospital discharge, after adjusting for other baseline and
+hospitalization characteristics.
+
+### Exposure Definition, Aim 1
+
+lorem ipsum
+
+## Aim 2
+
+### Exposure Definition, Aim 2
+
+lorem ipsum
+
+## Outcome Definitions
+
+For both aims, outcomes include the following, measured at 3 and 12 months
+following hospital discharge:
+
+- **Disability**
+    - Katz Activities of Daily Living (ADL)
+    - Pfeffer Functional Activities Questionnaire (FAQ)
+    - Discharge destination (home vs facility)
+- **Physical HRQOL**: Short Form-36 Physical Component Score (PCS)
+- **Mortality**: Time to death at 90 and 365 days after discharge
+
+# Statistical Methods
+
+At each time point (hospital discharge, 3-month follow-up, and 12-month
+follow-up), all patients will be included in analysis who were alive and not
+officially withdrawn from the study.
+
+## Model Choice
+
+We will use the following types of multivariable regression to assess the
+relationship between measures of LOC during hospitalization and each outcome
+variable:
+
+- Discharge location (home vs facility): logistic regression
+- Katz ADL, Pfeffer FAQ: proportional odds logistic regression
+- SF36 Physical Component Score: ordinary least squares (linear) regression
+- Mortality at 90 and 365 days after enrollment: Cox proportional hazards regression
+
+Model assumptions for each outcome and time point will be checked graphically.
+
+## Model Covariates
+
+All multivariable models will be adjusted for the following covariates:
+
+- Baseline and ICU admission characteristics
+    - Age
+    - Sex
+    - Race (white vs other race)
+    - BMI
+    - Education
+    - Charlson Comorbidity Index
+    - CSHA Clinical Frailty Score at ICU admission
+    - Pfeffer FAQ at ICU admission*
+    - Hospital type (civilian vs veteran)
+- Hospitalization characteristics
+    - Mean daily SOFA score, modified *(GCS not included, as it is directly calculated from our primary exposure)*
+    - Duration of severe sepsis/septic shock
+    - Duration of mechanical ventilation
+    - Hospital length of stay
+
+All continuous variables will be allowed to have a nonlinear relationship with
+the outcome, using restricted cubic splines with three knots. (Exceptions include education and CSHA CFS, which have ) This results in a total of 22 degrees of
+freedom for covariates plus an additional 2df for exposure variables (total of
+24 in each model).
+
+<div class = 'marginnote plotlymargin'>
+```{r miss_outcomes, fig.margin = TRUE, fig.cap = "% of Eligible Patients with Missing Outcomes", fig.width = 4, fig.height = 3}
+missing_outcomes <- list(
+  df_discharge %>% dplyr::select(dc.facility),
+  df_3m %>% dplyr::select(one_of(outcome_vars)),
+  df_12m %>% dplyr::select(one_of(outcome_vars))
+) %>%
+  map_df(miss_var_summary) %>%
+  separate(variable, into = c("asmt", "timept"), sep = "\\.(?=\\d+$)") %>%
+  mutate(
+    asmt = case_when(
+      asmt == "dc.facility" ~ "D/C Loc.",
+      asmt == "sf36.pcs"    ~ "PCS",
+      TRUE                  ~ toupper(asmt)
+    ),
+    asmt = fct_relevel(asmt, "D/C Loc.", after = 3L),
+    timept = case_when(
+      is.na(timept) ~ "D/C",
+      TRUE ~ paste0(timept, "M")
+    ),
+    htext = glue("{n_miss} ({round(pct_miss)}%)")
+  )
+
+## Plotly won't stay in the margin?
+plot_ly(
+  missing_outcomes,
+  x = ~ pct_miss,
+  y = ~ asmt,
+  text = ~ htext,
+  color = ~ timept,
+  type = "bar", orientation = "h", hoverinfo = "text",
+  colors = c("#007471", "#003d74", "#000374")
+) %>%
+  layout(
+    barmode = "dodge",
+    xaxis = list(title = ""),
+    yaxis = list(title = ""),
+    legend = list(orientation = "h", traceorder = "reversed")
+  )
+
+# miss_plot <- ggplot(data = missing_outcomes) +
+#   aes(y = pct_miss, x = asmt, fill = timept) +
+#   geom_bar(stat = "identity", position = "dodge") +
+#   coord_flip() +
+#   labs(
+#     title = "Proportion of Eligible Patients with Missing Outcomes"
+#   )
+# 
+# ggplotly(miss_plot)
+
+```
+</div>
+
+## Missing Data {.tabset}
+
+At each time point, all patients will be included in analysis who remained alive
+and in the study. Missing data for covariates (quite minimal) and outcomes will
+be handled using multiple imputation using predictive mean matching with `r n_imp` imputations, using R's `Hmisc::aregImpute()` and `rms::fit.mult.impute()`
+functions. Proportions of eligible patients with each outcome data point
+available are shown to the right. The minimal missingness among covariates is
+shown below; the maximum amount missing for any individual covariate at any time
+point is <2%. At hospital discharge, `r scales::percent(prop_miss_case(df_discharge))` of eligible patients are missing
+outcome or covariate data; at 3-month follow-up,
+`r scales::percent(prop_miss_case(df_3m))` patients; and at 12-month follow-up,
+`r scales::percent(prop_miss_case(df_12m))`.
+
+```{r missing_data}
+df_missing <- bind_rows(
+  df_discharge %>% mutate(timept = "Hospital Discharge"),
+  df_3m %>% mutate(timept = "3 Months"),
+  df_12m %>% mutate(timept = "12 Months")
+) %>%
+  mutate(
+    timept = forcats::fct_relevel(timept, "Hospital Discharge", "3 Months")
+  ) %>%
+  dplyr::select(timept, one_of(oneobs_covars)) ## one_of(exposure_vars)
+
+```
+
+<details><summary>Details of Missingness among Covariates</summary>
+```{r plot_missing, fig.fullwidth = TRUE}
+miss_plot <- naniar::gg_miss_var(df_missing, timept, show_pct = TRUE) +
+  scale_y_continuous(name = "% Missing", limits = c(0, 5)) +
+  geom_hline(yintercept = 5, colour = "gray50", linetype = "dotted") +
+  theme(axis.title.y = element_blank())
+
+ggplotly(miss_plot)
+
+```
+
+</details>
+
+# Study Cohort
+
+Analyses will include all ICU survivors who were alive and remained in the study
+(ie, had not withdrawn) at the specified time point. Patients who died or
+officially withdrew from the study prior to assessment are not included in analyses at that time point. Missing data for individual assessments will be
+handled via multiple imputation (discussed in further detail in Methods).
+
+```{r print_consort}
 consort_info %>%
   dplyr::select(current, npct) %>%
   kable(
