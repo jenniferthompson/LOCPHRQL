@@ -4,7 +4,6 @@ author: "Jennifer Thompson, MPH<br>Supervisor: Rameela Chandrasekhar, PhD"
 date: "`r format(Sys.Date(), '%B %d, %Y')`"
 output:
   tufte::tufte_html:
-    tufte_variant: "envisioned"
     toc: TRUE
     toc_depth: 1
 ---
@@ -17,6 +16,7 @@ output:
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
 
 library(knitr)
+library(tufte)
 library(tidyverse)
 library(stringr)
 library(glue)
@@ -25,6 +25,7 @@ library(tableone)
 library(rms)
 library(naniar)
 library(plotly)
+library(MESS)
 
 load("data/brainmind_deid.Rdata")
 
@@ -215,13 +216,55 @@ consort_info <- bind_rows(
 ## -- Calculate AUC for lowest daily RASSes (exposure) -------------------------
 ## "AUC" = amount of "low LOC" each patient experienced in the hospital
 ## Very, very few research RASSes were >0; combine these with 0
-rass_auc <- brainmind.daily %>%
-  mutate(
-    on_sedation = rcvd.benz | rcvd.op | rcvd.prop | rcvd.dex
+
+## Find lowest research staff RASS on each study day
+low_rasses_res <- brainmind.assess %>%
+  filter(!is.na(rass.daily)) %>%
+  group_by(id, study.day) %>%
+  summarise(
+    rass.low.res = min(rass.daily, na.rm = TRUE)
   ) %>%
-  filter(!is.na(mental.stat.imp), !is.na(on_sedation))
+  ungroup()
 
+## Combine with lowest bedside RASSes
+rass_for_auc <- brainmind.daily %>%
+  left_join(low_rasses_res, by = c("id", "study.day")) %>%
+  ## For each patient-day, find lowest RASS
+  mutate(
+    on_sedation = rcvd.benz | rcvd.op | rcvd.prop | rcvd.dex,
+    lowest_rass = case_when(
+      !is.na(rass.low.icu) & rass.low.icu < rass.low.res ~ rass.low.icu,
+      TRUE                                               ~ rass.low.res
+    ),
+    ## Collapse all RASSes > 0 to 0
+    ##  (very few; for our purposes they are equivalent)
+    rass_distance = if_else(
+      lowest_rass > 0, 0, lowest_rass * -1, missing = as.numeric(NA)
+    )
+  ) %>%
+  ## Days without mental status available and without sedation info available
+  ##  are generally days patient was discharged/died (last days of
+  ##  hospitalization)
+  filter(id %in% ids_discharge, !is.na(mental.stat.imp), !is.na(on_sedation)) %>%
+  dplyr::select(id, study.day, on_sedation, lowest_rass, rass_distance)
 
+# ## How many ICU survivors only have one RASS?
+# rass_for_auc %>%
+#   filter(!is.na(rass_distance)) %>%
+#   group_by(id) %>%
+#   count() %>%
+#   filter(n == 1)
+
+auc_ids <- rass_for_auc %>%
+  filter(!is.na(rass_distance)) %>%
+  group_by(id) %>% count() %>% filter(n > 1) %>% pull(id)
+
+auc_values <- rass_for_auc %>%
+  filter(id %in% auc_ids) %>%
+  group_by(id) %>%
+  summarise(
+    rass_auc_total = auc(x = study.day, y = rass_distance, rule = 2)
+  )
 
 ## -- Minor data management for baseline/hospital characteristics --------------
 brainmind.oneobs <- brainmind.oneobs %>%
@@ -236,15 +279,17 @@ brainmind.oneobs <- brainmind.oneobs %>%
     ),
     ## For covariates, patients who were never on MV need 0 imputed for vent LOS
     vent.los.all = ifelse(!is.na(vent.los.tot), vent.los.tot, 0)
-  )
+  ) %>%
+  ## Add on RASS AUC
+  left_join(auc_values, by = "id")
 
 oneobs_covars <- c(
-  "age.enroll", "sex.pp", "race.wb", "bmi", "edu", "charlson.score", "frailty",
-  "faq.e", "hosp.type", "mean.modsofa.icu", "icudays.sevseptic.s",
+  "age.enroll", "sex.pp", "race.wb", "bmi", "edu", "charlson.score",
+  "frailty.e", "faq.e", "hosp.type", "mean.modsofa.icu", "icudays.sevseptic.s",
   "vent.los.all", "hosp.los"
 )
 
-exposure_vars <- c()
+exposure_vars <- c("rass_auc_total")
 
 outcome_vars <- c(
   "dc.facility",
@@ -268,23 +313,25 @@ df_full <- brainmind.oneobs %>% left_join(fu_subset, by = "id")
 
 df_discharge <- df_full %>%
   filter(id %in% ids_discharge) %>%
-  dplyr::select(id, one_of(oneobs_covars), dc.facility) #one_of(exposure_vars), 
+  dplyr::select(id, one_of(oneobs_covars), dc.facility, one_of(exposure_vars))
 
 df_3m <- df_full %>%
   filter(id %in% ids_3m) %>%
   dplyr::select(
     id,
     one_of(oneobs_covars),
-    one_of(str_subset(names(fu_subset), "\\.3"))
-  ) #one_of(exposure_vars), 
+    one_of(str_subset(names(fu_subset), "\\.3")),
+    one_of(exposure_vars)
+  )
 
 df_12m <- df_full %>%
   filter(id %in% ids_12m) %>%
   dplyr::select(
     id,
     one_of(oneobs_covars),
-    one_of(str_subset(names(fu_subset), "\\.12"))
-  ) #one_of(exposure_vars), 
+    one_of(str_subset(names(fu_subset), "\\.12")),
+    one_of(exposure_vars)
+  )
 
 ```
 
@@ -299,6 +346,16 @@ hospitalizations recorded in the parent studies.
 
 # Study Aims
 
+```{marginfigure, echo = TRUE}
+**Exposure defintion, Aim 1:**
+
+Area under the curve (AUC) of lowest daily RASS's distance from 0 during hospitalization *(calculated using linear interpolation, with missing values
+interpolated with the closest non-missing data point)*. Lowest daily RASS is out
+of all available RASSes collected by the research staff and the lowest RASS
+recorded by the bedside nursing team, if available.
+
+```
+
 ## Aim 1
 
 We hypothesize that lower LOC during critical illness is associated with greater
@@ -306,15 +363,16 @@ disability and worsened physical health-related quality of life at 3 and 12
 months after hospital discharge, after adjusting for other baseline and
 hospitalization characteristics.
 
-### Exposure Definition, Aim 1
+```{marginfigure, echo = TRUE}
+**Exposure definition, Aim 2:**
 
 lorem ipsum
+
+```
 
 ## Aim 2
 
-### Exposure Definition, Aim 2
-
-lorem ipsum
+[pending further discussion]
 
 ## Outcome Definitions
 
@@ -326,7 +384,7 @@ following hospital discharge:
     - Pfeffer Functional Activities Questionnaire (FAQ)
     - Discharge destination (home vs facility)
 - **Physical HRQOL**: Short Form-36 Physical Component Score (PCS)
-- **Mortality**: Time to death at 90 and 365 days after discharge
+- **Mortality**: Time to death at 90 and 365 days after discharge *(THIS IS A BIG MAYBE; event rates are very low for including this # covariates)*
 
 # Statistical Methods
 
@@ -354,23 +412,23 @@ All multivariable models will be adjusted for the following covariates:
 - Baseline and ICU admission characteristics
     - Age
     - Sex
-    - Race (white vs other race)
+    - Race^[(white vs other race)]
     - BMI
     - Education
     - Charlson Comorbidity Index
     - CSHA Clinical Frailty Score at ICU admission
-    - Pfeffer FAQ at ICU admission*
-    - Hospital type (civilian vs veteran)
+    - Pfeffer FAQ at ICU admission
+    - Hospital type^[(civilian vs veteran)]
 - Hospitalization characteristics
-    - Mean daily SOFA score, modified *(GCS not included, as it is directly calculated from our primary exposure)*
+    - Mean daily SOFA score, modified^[*(GCS not included, as it is directly calculated from our primary exposure)*]
     - Duration of severe sepsis/septic shock
     - Duration of mechanical ventilation
     - Hospital length of stay
 
 All continuous variables will be allowed to have a nonlinear relationship with
-the outcome, using restricted cubic splines with three knots. (Exceptions include education and CSHA CFS, which have ) This results in a total of 22 degrees of
-freedom for covariates plus an additional 2df for exposure variables (total of
-24 in each model).
+the outcome, using restricted cubic splines with three knots. This results in a
+total of 22 degrees of freedom for covariates plus an additional 2df for
+exposure variables (total of 25 in each model).
 
 <div class = 'marginnote plotlymargin'>
 ```{r miss_outcomes, fig.margin = TRUE, fig.cap = "% of Eligible Patients with Missing Outcomes", fig.width = 4, fig.height = 3}
@@ -412,31 +470,22 @@ plot_ly(
     legend = list(orientation = "h", traceorder = "reversed")
   )
 
-# miss_plot <- ggplot(data = missing_outcomes) +
-#   aes(y = pct_miss, x = asmt, fill = timept) +
-#   geom_bar(stat = "identity", position = "dodge") +
-#   coord_flip() +
-#   labs(
-#     title = "Proportion of Eligible Patients with Missing Outcomes"
-#   )
-# 
-# ggplotly(miss_plot)
-
 ```
 </div>
 
-## Missing Data {.tabset}
+## Missing Data
 
 At each time point, all patients will be included in analysis who remained alive
-and in the study. Missing data for covariates (quite minimal) and outcomes will
-be handled using multiple imputation using predictive mean matching with `r n_imp` imputations, using R's `Hmisc::aregImpute()` and `rms::fit.mult.impute()`
-functions. Proportions of eligible patients with each outcome data point
-available are shown to the right. The minimal missingness among covariates is
-shown below; the maximum amount missing for any individual covariate at any time
-point is <2%. At hospital discharge, `r scales::percent(prop_miss_case(df_discharge))` of eligible patients are missing
+and in the study. Missing data for covariates (quite minimal; detailed below)
+and outcomes will be handled using multiple imputation using predictive mean
+matching with `r n_imp` imputations, using R's `Hmisc::aregImpute()` and `rms::fit.mult.impute()` functions. Proportions of eligible patients with each
+outcome data point available are shown to the right. The maximum amount missing
+for any individual covariate at any time point is <2%. At hospital discharge, `r scales::percent(prop_miss_case(df_discharge))` of eligible patients are missing
 outcome or covariate data; at 3-month follow-up,
 `r scales::percent(prop_miss_case(df_3m))` patients; and at 12-month follow-up,
-`r scales::percent(prop_miss_case(df_12m))`.
+`r scales::percent(prop_miss_case(df_12m))`. Using multiple imputation is
+particularly important for follow-up outcomes, where we suspect that the
+patients who might have the worst outcomes are most prone to missingness.
 
 ```{r missing_data}
 df_missing <- bind_rows(
@@ -469,7 +518,7 @@ ggplotly(miss_plot)
 Analyses will include all ICU survivors who were alive and remained in the study
 (ie, had not withdrawn) at the specified time point. Patients who died or
 officially withdrew from the study prior to assessment are not included in analyses at that time point. Missing data for individual assessments will be
-handled via multiple imputation (discussed in further detail in Methods).
+handled via multiple imputation.
 
 ```{r print_consort}
 consort_info %>%
