@@ -336,43 +336,80 @@ df_12m <- df_full %>%
 ```
 
 The following analyses use data from the BRAIN-ICU and MIND-ICU cohorts to
-examine the association between level of consciousness (LOC) during critical
-illness and long-term disability, physical health-related quality of life
-(pHRQOL), and mortality at 3 and 12 months following hospital discharge.
+examine the association between several measures of level of consciousness (LOC)
+during critical illness and long-term disability, physical health-related
+quality of life (pHRQOL), and mortality at 3 and 12 months following hospital discharge.
 
 Throughout the analysis, level of consciousness (LOC) is measured using the Richmond Agitation-Sedation Scale (RASS). The RASS was performed by research
 staff twice daily in the ICU and once daily outside the ICU during the
-hospitalizations recorded in the parent studies.
+hospitalizations recorded in the parent studies. There are four exposures of
+interest, each related to lowest daily RASS on days patients met specific
+criteria.
 
 # Study Aims
+
+For all exposures, AUC is calculated using linear interpolation, with missing
+values interpolated with the closest non-missing data point.
 
 ```{marginfigure, echo = TRUE}
 **Exposure defintion, Aim 1:**
 
-Area under the curve (AUC) of lowest daily RASS's distance from 0 during hospitalization *(calculated using linear interpolation, with missing values
-interpolated with the closest non-missing data point)*. Lowest daily RASS is out
-of all available RASSes collected by the research staff and the lowest RASS
-recorded by the bedside nursing team, if available.
+Area under the curve (AUC) of all lowest daily RASS's distance from 0 during hospitalization.
 
 ```
 
 ## Aim 1
 
-We hypothesize that lower LOC during critical illness is associated with greater
-disability and worsened physical health-related quality of life at 3 and 12
-months after hospital discharge, after adjusting for other baseline and
+We hypothesize that lower overall LOC during critical illness is associated with
+greater disability and worsened physical health-related quality of life at 3 and
+12 months after hospital discharge, after adjusting for other baseline and
 hospitalization characteristics.
 
 ```{marginfigure, echo = TRUE}
 **Exposure definition, Aim 2:**
 
-lorem ipsum
+Area under the curve (AUC) of all lowest daily RASS's distance from 0 on days
+when patient received at least one of the following medications:
+benzodiazepines; opioids; propofol; dexmedetomidine; haloperidol.
 
 ```
 
 ## Aim 2
 
-[pending further discussion]
+We hypothesize that lower LOC **while patient is on sedating medications**
+during critical illness is associated with greater disability and worsened
+physical health-related quality of life at 3 and 12 months after hospital
+discharge, after adjusting for other baseline and hospitalization characteristics.
+
+```{marginfigure, echo = TRUE}
+**Exposure definition, Aim 3:**
+
+Area under the curve (AUC) of all lowest daily RASS's distance from 0 on days
+when patient received benzodiazepines.
+
+```
+
+## Aim 3
+
+We hypothesize that lower LOC **on days patients received benzodiazepines**
+during critical illness is associated with greater disability and worsened
+physical health-related quality of life at 3 and 12 months after hospital
+discharge, after adjusting for other baseline and hospitalization characteristics, *including* doses of opioids and propofol.
+
+```{marginfigure, echo = TRUE}
+**Exposure definition, Aim 4:**
+
+Area under the curve (AUC) of all lowest daily RASS's distance from 0 on days
+when patient received propofol.
+
+```
+
+## Aim 4
+
+We hypothesize that lower LOC **on days patients received propofol**
+during critical illness is associated with greater disability and worsened
+physical health-related quality of life at 3 and 12 months after hospital
+discharge, after adjusting for other baseline and hospitalization characteristics, *including* doses of opioids and benzodiazepines.
 
 ## Outcome Definitions
 
@@ -429,6 +466,11 @@ All continuous variables will be allowed to have a nonlinear relationship with
 the outcome, using restricted cubic splines with three knots. This results in a
 total of 22 degrees of freedom for covariates plus an additional 2df for
 exposure variables (total of 25 in each model).
+
+For aims 3 & 4 **only**, doses of opioids and propofol (Aim 3) or
+benzodiazepines (Aim 4) will also be included as covariates, as these
+medications may confound the association between benzodiazepine- or propofol-
+related LOC, respectively, and outcomes.
 
 <div class = 'marginnote plotlymargin'>
 ```{r miss_outcomes, fig.margin = TRUE, fig.cap = "% of Eligible Patients with Missing Outcomes", fig.width = 4, fig.height = 3}
