@@ -123,16 +123,18 @@ screened_df <- bind_rows(
     ## Assume missing at 3m indicates no follow-up but patient still alive and
     ##  in study (no death or withdrawal recorded)
     status.3 = case_when(
-      !is.na(status.3) ~ status.3,
       exc_status != "Enrolled" |
+        wd_data |
         dc_status != "ICU survivor, eligible for inclusion" ~
         as.character(NA),
+      !is.na(status.3) ~ status.3,
       TRUE ~ "Alive and in study"
     ),
     ## 12m status is NA if patient died or withdrew before 3m; otherwise, if
     ##  missing, assume patient was alive and in study (no death/withdrawal rec.)
     status.12 = case_when(
       exc_status != "Enrolled" |
+        wd_data |
         dc_status != "ICU survivor, eligible for inclusion" |
         status.3 %in% paste(c("Died", "Withdrew"), "before follow-up") ~
           as.character(NA),
@@ -407,7 +409,6 @@ df_full <- brainmind.oneobs %>% left_join(fu_subset, by = "id")
 
 df_discharge <- df_full %>%
   filter(id %in% ids_discharge) %>%
-  # reduce(list(., auc_values_total, auc_values_sed), left_join, by = "id") %>%
   dplyr::select(id, one_of(oneobs_covars), dc.facility, one_of(exposure_vars))
 
 df_3m <- df_full %>%
@@ -703,6 +704,8 @@ not calculate the area under a curve.) Patients who died or officially withdrew 
 patients received those medications during the in-hospital study period.
 Specific Ns will be included with each set of models.
 
+### Patient Flow
+
 ```{r print_consort}
 consort_info %>%
   dplyr::select(current, npct) %>%
@@ -716,5 +719,70 @@ consort_info %>%
   group_rows("Twelve-Month Follow-Up", 16, 19) %>%
   row_spec(row = c(7, 11, 15, 19), bold = TRUE) %>%
   kable_styling(full_width = FALSE, position = "left")
+
+```
+
+### Description of the Cohorts
+
+```{r describe_cohort}
+## For now, just describe patients eligible for discharge to facility
+html(
+  summaryM(
+    age.enroll + sex.pp + race.wb + bmi + edu + charlson.score + frailty.e +
+      adl.e + faq.e + hosp.type + num.apache + sofa + icudays.sevseptic.s +
+      vent.los.all + del.s.imp + coma.s.imp + delcoma.s.imp + icu.los.tot +
+      hosp.los + dc.facility ~ 1,
+     data = subset(brainmind.oneobs, id %in% ids_discharge),
+     continuous = 5
+  ),
+  prmsd = TRUE,
+  digits = 2,
+  what = "%",
+  npct = "both",
+  exclude1 = FALSE, long = TRUE,
+  caption = "Baseline and Hospitalization Characteristics, Patients Eligible for Analysis at Discharge"
+)
+
+```
+
+### Description of Outcomes
+
+```{r describe_3m}
+html(
+  summaryM(
+    as.formula(paste(
+      paste(str_subset(outcome_vars, "\\.3$"), collapse = " + "),
+      "~ 1"
+    )),
+    data = df_3m,
+    continuous = 5
+  ),
+  prmsd = TRUE,
+  digits = 2,
+  what = "%",
+  npct = "both",
+  exclude1 = FALSE, long = TRUE,
+  caption = "Outcomes of Interest, 3-Month Follow-Up"
+)
+
+```
+
+```{r describe_12m}
+html(
+  summaryM(
+    as.formula(paste(
+      paste(str_subset(outcome_vars, "\\.12$"), collapse = " + "),
+      "~ 1"
+    )),
+    data = df_12m,
+    continuous = 5
+  ),
+  prmsd = TRUE,
+  digits = 2,
+  what = "%",
+  npct = "both",
+  exclude1 = FALSE, long = TRUE,
+  caption = "Outcomes of Interest, 12-Month Follow-Up"
+)
 
 ```
