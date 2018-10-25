@@ -45,6 +45,14 @@ brainmind.exc <- clear.labels(brainmind.exc)
 ```
 
 ```{r consort_df}
+## -- How many days with RASS available for each patient? ----------------------
+## Can't be included in any analysis if not at least two
+n_rass_days <- brainmind.assess %>%
+  filter(!is.na(rass.daily)) %>%
+  distinct(id, study.day) %>%
+  count(id) %>%
+  mutate(elig_auc_total = n >= 2)
+
 ## -- Determine status at each follow-up point ---------------------------------
 fu_wide <- brainmind.fu %>%
   dplyr::select(id, fu.period, status) %>%
@@ -80,6 +88,7 @@ screened_df <- bind_rows(
     dplyr::select(id, exc_status),
   brainmind.oneobs %>%
     dplyr::select(id, studywd.amt, died.inhosp) %>%
+    left_join(n_rass_days, by = "id") %>%
     mutate(
       id = as.character(id),
       exc_status = "Enrolled",
@@ -92,16 +101,19 @@ screened_df <- bind_rows(
   mutate(
     dc_status = factor(
       case_when(
+        wd_data                                                 ~ as.numeric(NA),
         !is.na(died.inhosp) & died.inhosp == "Died in hospital" ~ 1,
         !is.na(studywd.amt)                                     ~ 2,
         !(exc_status == "Enrolled")                             ~ as.numeric(NA),
-        TRUE                                                    ~ 3
+        !elig_auc_total                                         ~ 3,
+        TRUE                                                    ~ 4
       ),
-      levels = 1:3,
+      levels = 1:4,
       labels = c(
         "Died during hospitalization",
         "Withdrew during hospitalization",
-        "ICU survivor"
+        "Survived with <2 days with RASS",
+        "ICU survivor, eligible for inclusion"
       )
     )
   ) %>%
@@ -113,7 +125,7 @@ screened_df <- bind_rows(
     status.3 = case_when(
       !is.na(status.3) ~ status.3,
       exc_status != "Enrolled" |
-        dc_status != "ICU survivor" ~
+        dc_status != "ICU survivor, eligible for inclusion" ~
         as.character(NA),
       TRUE ~ "Alive and in study"
     ),
@@ -121,7 +133,7 @@ screened_df <- bind_rows(
     ##  missing, assume patient was alive and in study (no death/withdrawal rec.)
     status.12 = case_when(
       exc_status != "Enrolled" |
-        dc_status != "ICU survivor" |
+        dc_status != "ICU survivor, eligible for inclusion" |
         status.3 %in% paste(c("Died", "Withdrew"), "before follow-up") ~
           as.character(NA),
       !is.na(status.12) ~ status.12,
@@ -130,7 +142,8 @@ screened_df <- bind_rows(
   )
 
 ## -- IDs of patients in discharge, 3m, 12m cohorts ----------------------------
-ids_discharge <- screened_df %>% filter(dc_status == "ICU survivor") %>% pull(id)
+ids_discharge <- screened_df %>%
+  filter(dc_status == "ICU survivor, eligible for inclusion") %>% pull(id)
 ids_3m <- screened_df %>% filter(status.3 == "Alive and in study") %>% pull(id)
 ids_12m <- screened_df %>% filter(status.12 == "Alive and in study") %>% pull(id)
 
@@ -158,18 +171,21 @@ consort_inhosp <- tribble(
     sum_na(screened_df$dc_status == "Died during hospitalization"),
   "Withdrew in hospital",
     sum_na(screened_df$dc_status == "Withdrew during hospitalization"),
+  "Discharged, but <2 days with RASS",
+    sum_na(screened_df$dc_status == "Survived with <2 days with RASS"),
   "Discharged, remained in study",
-    sum_na(screened_df$dc_status == "ICU survivor")
+    sum_na(screened_df$dc_status == "ICU survivor, eligible for inclusion")
 ) %>%
   mutate(denom = n_elig_hosp)
 
-n_elig_dc <- sum_na(screened_df$dc_status == "ICU survivor")
+n_elig_dc <-
+  sum_na(screened_df$dc_status == "ICU survivor, eligible for inclusion")
 
 ## -- 3m followup section ------------------------------------------------------
 consort_3m <- tribble(
   ~ current,                            ~ npts,
   "Alive and in study at discharge",
-    sum_na(screened_df$dc_status == "ICU survivor"),
+    sum_na(screened_df$dc_status == "ICU survivor, eligible for inclusion"),
   "Died before 3m follow-up",
     sum_na(screened_df$status.3 == "Died before follow-up"),
   "Withdrew before 3m follow-up",
@@ -231,7 +247,7 @@ low_rasses_res <- brainmind.assess %>%
 rass_for_auc <- brainmind.daily %>%
   left_join(low_rasses_res, by = c("id", "study.day")) %>%
   mutate(
-    on_sedation = rcvd.benz | rcvd.op | rcvd.prop | rcvd.dex,
+    on_sedation = rcvd.benz | rcvd.op | rcvd.prop | rcvd.dex | rcvd.hal,
     ## xxx Combine with lowest bedside RASSes xxx
     ## Update: Decided to only use research staff RASS assessments
     ## For each patient-day, find lowest RASS
@@ -265,7 +281,7 @@ rass_for_auc <- brainmind.daily %>%
   ## Days without mental status available and without sedation info available
   ##  are generally days patient was discharged/died (last days of
   ##  hospitalization)
-  filter(id %in% ids_discharge, !is.na(mental.stat.imp), !is.na(on_sedation)) %>%
+  filter(id %in% ids_discharge, !is.na(lowest_rass)) %>%
   dplyr::select(
     id, study.day, on_sedation, lowest_rass, starts_with("rass_dist")
   )
@@ -321,7 +337,7 @@ auc_total_ids <- rass_for_auc %>%
   group_by(id) %>% count() %>% filter(n > 1) %>% pull(id)
 
 auc_sed_ids <- rass_for_auc %>%
-  filter(!is.na(rass_dist_sed)) %>%
+  filter(!is.na(rass_dist_sed), !is.na(on_sedation)) %>%
   group_by(id) %>% count() %>% filter(n > 1) %>% pull(id)
 
 ## Calculate AUCs of each type
@@ -683,6 +699,10 @@ Analyses will include all ICU survivors who were alive and remained in the study
 (ie, had not withdrawn) at the specified time point, and at least two RASS measurements meeting criteria. (If <2 RASS measurements were available, we could
 not calculate the area under a curve.) Patients who died or officially withdrew from the study prior to assessment are not included in analyses at that time point. Missing data for individual assessments will be handled via multiple imputation.
 
+**Note** that fewer patients will be included in models looking at levels of consciousness while patients received sedating medication, since not all
+patients received those medications during the in-hospital study period.
+Specific Ns will be included with each set of models.
+
 ```{r print_consort}
 consort_info %>%
   dplyr::select(current, npct) %>%
@@ -691,10 +711,10 @@ consort_info %>%
     escape = FALSE
   ) %>%
   group_rows("Screening", 1, 7) %>%
-  group_rows("In-Hospital", 8, 10) %>%
-  group_rows("Three-Month Follow-Up", 11, 14) %>%
-  group_rows("Twelve-Month Follow-Up", 15, 18) %>%
-  row_spec(row = c(7, 10, 14, 18), bold = TRUE) %>%
+  group_rows("In-Hospital", 8, 11) %>%
+  group_rows("Three-Month Follow-Up", 12, 15) %>%
+  group_rows("Twelve-Month Follow-Up", 16, 19) %>%
+  row_spec(row = c(7, 11, 15, 19), bold = TRUE) %>%
   kable_styling(full_width = FALSE, position = "left")
 
 ```
