@@ -364,6 +364,14 @@ auc_values_sed <- rass_for_auc %>%
 ## -- Minor data management for baseline/hospital characteristics --------------
 brainmind.oneobs <- brainmind.oneobs %>%
   mutate(
+    race.comb = factor(
+      case_when(
+        is.na(race.pp)     ~ as.numeric(NA),
+        race.pp == "White" ~ 0,
+        TRUE               ~ 1
+      ),
+      levels = 0:1, labels = c("White", "Non-white")
+    ),
     frailty.e = as.numeric(stringr::str_sub(frailty, 1, 1)),
     hosp.type = factor(
       as.numeric(id >= 14000), levels = 0:1, labels = c("Civilian", "Veteran")
@@ -380,7 +388,7 @@ brainmind.oneobs <- brainmind.oneobs %>%
   left_join(auc_values_sed, by = "id")
 
 oneobs_covars <- c(
-  "age.enroll", "sex.pp", "race.wb", "bmi", "edu", "charlson.score",
+  "age.enroll", "sex.pp", "race.comb", "bmi", "edu", "charlson.score",
   "frailty.e", "faq.e", "hosp.type", "mean.modsofa.icu", "icudays.sevseptic.s",
   "vent.los.all", "hosp.los"
 )
@@ -537,7 +545,7 @@ All multivariable models will be adjusted for the following covariates:
 
 All continuous variables will be allowed to have a nonlinear relationship with
 the outcome, using restricted cubic splines with three knots. This results in a
-total of 22 degrees of freedom for covariates plus an additional 2df for
+total of 23 degrees of freedom for covariates plus an additional 2df for
 exposure variables (total of 25 in each model).
 
 <div class = 'marginnote plotlymargin'>
@@ -728,7 +736,7 @@ consort_info %>%
 ## For now, just describe patients eligible for discharge to facility
 html(
   summaryM(
-    age.enroll + sex.pp + race.wb + bmi + edu + charlson.score + frailty.e +
+    age.enroll + sex.pp + race.comb + bmi + edu + charlson.score + frailty.e +
       adl.e + faq.e + hosp.type + num.apache + sofa + icudays.sevseptic.s +
       vent.los.all + del.s.imp + coma.s.imp + delcoma.s.imp + icu.los.tot +
       hosp.los + dc.facility ~ 1,
@@ -786,3 +794,38 @@ html(
 )
 
 ```
+
+```{r model_prep}
+## -- Multiple imputation at each time point -----------------------------------
+## Don't bother with hospital discharge; <2% missing
+set.seed(56)
+areg_3m <- aregImpute(
+  ~ sf36.pcs.3 + mean.modsofa.icu +
+    icudays.sevseptic.s + bmi + rass_auc_total + age.enroll + sex.pp +
+    race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
+    hosp.los + I(faq.3) + I(adl.3) + edu + I(faq.e),
+    ## FAQ, ADL have too many zeros/too few others to reliably allow for knots
+  data = df_3m,
+  nk = 3,
+  n.impute = n_imp
+)
+
+set.seed(56)
+areg_12m <- aregImpute(
+  ~ sf36.pcs.12 + mean.modsofa.icu +
+    icudays.sevseptic.s + bmi + rass_auc_total + age.enroll + sex.pp +
+    race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
+    hosp.los + I(faq.12) + I(adl.12) + edu + I(faq.e),
+    ## FAQ, ADL have too many zeros/too few others to reliably allow for knots
+  data = df_12m,
+  nk = 3,
+  n.impute = n_imp
+)
+
+## Character string for RHS of models
+##  "rassvar" will be replaced with exposure of interest
+model_rhs <- "rcs(age.enroll, 3) + sex.pp + race.comb + rcs(bmi, 3) + rcs(edu, 3) + rcs(charlson.score, 3) + rcs(frailty.e, 3) + rcs(faq.e, 3) + hosp.type + rcs(mean.modsofa.icu, 3) + rcs(icudays.sevseptic.s, 3) + rcs(vent.los.all, 3) + rcs(hosp.los, 3) + rcs(rassvar, 3)"
+
+```
+
+# Activities of Daily Living
