@@ -215,56 +215,133 @@ consort_info <- bind_rows(
 ```{r data_prep}
 ## -- Calculate AUC for lowest daily RASSes (exposure) -------------------------
 ## "AUC" = amount of "low LOC" each patient experienced in the hospital
-## Very, very few research RASSes were >0; combine these with 0
+## Very, very few research RASSes were >0; combine these with 0, since our
+##  primary question of interest is really about sedation
 
-## Find lowest research staff RASS on each study day
+## Find lowest research staff RASS on each study day; this will be summarized
+##  as our primary exposure
 low_rasses_res <- brainmind.assess %>%
   filter(!is.na(rass.daily)) %>%
   group_by(id, study.day) %>%
   summarise(
-    rass.low.res = min(rass.daily, na.rm = TRUE)
+    lowest_rass = min(rass.daily, na.rm = TRUE)
   ) %>%
   ungroup()
 
-## Combine with lowest bedside RASSes
 rass_for_auc <- brainmind.daily %>%
   left_join(low_rasses_res, by = c("id", "study.day")) %>%
-  ## For each patient-day, find lowest RASS
   mutate(
     on_sedation = rcvd.benz | rcvd.op | rcvd.prop | rcvd.dex,
-    lowest_rass = case_when(
-      !is.na(rass.low.icu) & rass.low.icu < rass.low.res ~ rass.low.icu,
-      TRUE                                               ~ rass.low.res
-    ),
+    ## xxx Combine with lowest bedside RASSes xxx
+    ## Update: Decided to only use research staff RASS assessments
+    ## For each patient-day, find lowest RASS
+    # lowest_rass = case_when(
+    #   !is.na(rass.low.icu) & rass.low.icu < rass.low.res ~ rass.low.icu,
+    #   TRUE                                               ~ rass.low.res
+    # ),
     ## Collapse all RASSes > 0 to 0
     ##  (very few; for our purposes they are equivalent)
-    rass_distance = if_else(
+    ## RASS distance, *all* hospital days
+    rass_dist_total = if_else(
       lowest_rass > 0, 0, lowest_rass * -1, missing = as.numeric(NA)
-    )
+    ),
+    ## RASS distance, days patient received any sedating medication
+    ##  (benzos, opioids, propofol, dex, haloperidol)
+    rass_dist_sed = if_else(
+      on_sedation, rass_dist_total, as.numeric(NA)
+    )#,
+    ## Keeping to reflect initial proposal, but decided that this was too
+    ##  fraught with issues; see discussions on Slack
+    ##  https://vumcicudelirium.slack.com/archives/C09D12EQL/p1540400730000100
+    # ## RASS distance, days patient received benzodiazepines
+    # rass_dist_benz = if_else(
+    #   as.logical(rcvd.benz), rass_dist_total, as.numeric(NA)
+    # ),
+    # ## RASS distance, days patient received propofol
+    # rass_dist_prop = if_else(
+    #   as.logical(rcvd.prop), rass_dist_total, as.numeric(NA)
+    # )
   ) %>%
   ## Days without mental status available and without sedation info available
   ##  are generally days patient was discharged/died (last days of
   ##  hospitalization)
   filter(id %in% ids_discharge, !is.na(mental.stat.imp), !is.na(on_sedation)) %>%
-  dplyr::select(id, study.day, on_sedation, lowest_rass, rass_distance)
+  dplyr::select(
+    id, study.day, on_sedation, lowest_rass, starts_with("rass_dist")
+  )
 
+## -- Exploration of RASSes for various subgroups, for original aims 3/4 -------
 # ## How many ICU survivors only have one RASS?
-# rass_for_auc %>%
-#   filter(!is.na(rass_distance)) %>%
+# how_many_rasses <- rass_for_auc %>%
 #   group_by(id) %>%
+#   summarise_at(vars(starts_with("rass_dist")), ~ sum(!is.na(.))) %>%
+#   ungroup() %>%
+#   gather(key = rass_type, value = rass_number, starts_with("rass_dist")) %>%
+#   mutate(rass_type = toupper(str_remove(rass_type, "rass_dist_")))
+# 
+# num_rasses_summary <- how_many_rasses %>%
+#   group_by(rass_type, rass_number) %>%
 #   count() %>%
-#   filter(n == 1)
+#   filter(rass_number < 2) %>%
+#   mutate(pct = n / length(ids_discharge))
+# 
+# ggplot(data = how_many_rasses) +
+#   aes(x = rass_number) +
+#   facet_wrap(~ rass_type) +
+#   geom_histogram(binwidth = 1)
 
-auc_ids <- rass_for_auc %>%
-  filter(!is.na(rass_distance)) %>%
+# rasses_while_benzo <- left_join(
+#   brainmind.daily %>%
+#     filter(rcvd.benz == 1) %>%
+#     dplyr::select(id, study.day, rcvd.benz) %>%
+#     ## Add counter for number of days
+#     add_count(id),
+#   brainmind.assess,
+#   by = c("id", "study.day")
+# ) %>%
+#   ## Only interested in ICU survivors
+#   filter(id %in% ids_discharge) %>%
+#   ## How many assessments per day?
+#   add_count(id, study.day)
+# 
+# ## How many had only one day with benzos, but two assessments on that day?
+# rasses_added_benzo <- rasses_while_benzo %>%
+#   filter(n == 1, nn == 2) %>%
+#   pull(id) %>%
+#   unique() %>%
+#   length()
+
+## Have to calculate AUCs separately for each cohort, because auc() fails with
+##  <2 non-NA values (ie, patient has no days on sedation)
+## Room for improvement: functionalize this
+
+## Get IDs to include in each cohort
+auc_total_ids <- rass_for_auc %>%
+  filter(!is.na(rass_dist_total)) %>%
   group_by(id) %>% count() %>% filter(n > 1) %>% pull(id)
 
-auc_values <- rass_for_auc %>%
-  filter(id %in% auc_ids) %>%
+auc_sed_ids <- rass_for_auc %>%
+  filter(!is.na(rass_dist_sed)) %>%
+  group_by(id) %>% count() %>% filter(n > 1) %>% pull(id)
+
+## Calculate AUCs of each type
+## All RASSes
+auc_values_total <- rass_for_auc %>%
+  filter(id %in% auc_total_ids) %>%
   group_by(id) %>%
   summarise(
-    rass_auc_total = auc(x = study.day, y = rass_distance, rule = 2)
-  )
+    rass_auc_total = auc(x = study.day, y = rass_dist_total, rule = 2)
+  ) %>%
+  ungroup()
+
+## RASSes while on sedation
+auc_values_sed <- rass_for_auc %>%
+  filter(id %in% auc_sed_ids) %>%
+  group_by(id) %>%
+  summarise(
+    rass_auc_sed = auc(x = study.day, y = rass_dist_sed, rule = 2)
+  ) %>%
+  ungroup()
 
 ## -- Minor data management for baseline/hospital characteristics --------------
 brainmind.oneobs <- brainmind.oneobs %>%
@@ -280,8 +357,9 @@ brainmind.oneobs <- brainmind.oneobs %>%
     ## For covariates, patients who were never on MV need 0 imputed for vent LOS
     vent.los.all = ifelse(!is.na(vent.los.tot), vent.los.tot, 0)
   ) %>%
-  ## Add on RASS AUC
-  left_join(auc_values, by = "id")
+  ## Add on RASS AUCs (reduce() was throwing an error, no time for that today)
+  left_join(auc_values_total, by = "id") %>%
+  left_join(auc_values_sed, by = "id")
 
 oneobs_covars <- c(
   "age.enroll", "sex.pp", "race.wb", "bmi", "edu", "charlson.score",
@@ -289,7 +367,7 @@ oneobs_covars <- c(
   "vent.los.all", "hosp.los"
 )
 
-exposure_vars <- c("rass_auc_total")
+exposure_vars <- c("rass_auc_total", "rass_auc_sed")
 
 outcome_vars <- c(
   "dc.facility",
@@ -313,6 +391,7 @@ df_full <- brainmind.oneobs %>% left_join(fu_subset, by = "id")
 
 df_discharge <- df_full %>%
   filter(id %in% ids_discharge) %>%
+  # reduce(list(., auc_values_total, auc_values_sed), left_join, by = "id") %>%
   dplyr::select(id, one_of(oneobs_covars), dc.facility, one_of(exposure_vars))
 
 df_3m <- df_full %>%
@@ -381,35 +460,12 @@ during critical illness is associated with greater disability and worsened
 physical health-related quality of life at 3 and 12 months after hospital
 discharge, after adjusting for other baseline and hospitalization characteristics.
 
-```{marginfigure, echo = TRUE}
-**Exposure definition, Aim 3:**
-
-Area under the curve (AUC) of all lowest daily RASS's distance from 0 on days
-when patient received benzodiazepines.
-
-```
-
-## Aim 3
-
-We hypothesize that lower LOC **on days patients received benzodiazepines**
-during critical illness is associated with greater disability and worsened
-physical health-related quality of life at 3 and 12 months after hospital
-discharge, after adjusting for other baseline and hospitalization characteristics, *including* doses of opioids and propofol.
-
-```{marginfigure, echo = TRUE}
-**Exposure definition, Aim 4:**
-
-Area under the curve (AUC) of all lowest daily RASS's distance from 0 on days
-when patient received propofol.
-
-```
-
-## Aim 4
-
-We hypothesize that lower LOC **on days patients received propofol**
-during critical illness is associated with greater disability and worsened
-physical health-related quality of life at 3 and 12 months after hospital
-discharge, after adjusting for other baseline and hospitalization characteristics, *including* doses of opioids and benzodiazepines.
+We have considered looking specifically at benzodiazepine- and
+propofol-associated level of consciousness; because a substantial number of
+patients received these medications fewer than two days while hospitalized (and
+thus cannot have an AUC calculated), this is not feasible to do with the same
+strategies as Aims 1 & 2 while reliably adjusting for important confounders.
+Work may be done on this area in the future.
 
 ## Outcome Definitions
 
@@ -467,17 +523,12 @@ the outcome, using restricted cubic splines with three knots. This results in a
 total of 22 degrees of freedom for covariates plus an additional 2df for
 exposure variables (total of 25 in each model).
 
-For aims 3 & 4 **only**, doses of opioids and propofol (Aim 3) or
-benzodiazepines (Aim 4) will also be included as covariates, as these
-medications may confound the association between benzodiazepine- or propofol-
-related LOC, respectively, and outcomes.
-
 <div class = 'marginnote plotlymargin'>
-```{r miss_outcomes, fig.margin = TRUE, fig.cap = "% of Eligible Patients with Missing Outcomes", fig.width = 4, fig.height = 3}
-missing_outcomes <- list(
-  df_discharge %>% dplyr::select(dc.facility),
-  df_3m %>% dplyr::select(one_of(outcome_vars)),
-  df_12m %>% dplyr::select(one_of(outcome_vars))
+```{r miss_outcomes, fig.margin = TRUE, fig.cap = "% of Patients with Missing Outcomes, All RASSes", fig.width = 4, fig.height = 3}
+missing_outcomes_total <- list(
+  df_discharge %>% filter(id %in% auc_total_ids) %>% dplyr::select(dc.facility),
+  df_3m %>% filter(id %in% auc_total_ids) %>% dplyr::select(one_of(outcome_vars)),
+  df_12m %>% filter(id %in% auc_total_ids) %>% dplyr::select(one_of(outcome_vars))
 ) %>%
   map_df(miss_var_summary) %>%
   separate(variable, into = c("asmt", "timept"), sep = "\\.(?=\\d+$)") %>%
@@ -497,7 +548,50 @@ missing_outcomes <- list(
 
 ## Plotly won't stay in the margin?
 plot_ly(
-  missing_outcomes,
+  missing_outcomes_total,
+  x = ~ pct_miss,
+  y = ~ asmt,
+  text = ~ htext,
+  color = ~ timept,
+  type = "bar", orientation = "h", hoverinfo = "text",
+  colors = c("#007471", "#003d74", "#000374")
+) %>%
+  layout(
+    barmode = "dodge",
+    xaxis = list(title = ""),
+    yaxis = list(title = ""),
+    legend = list(orientation = "h", traceorder = "reversed")
+  )
+
+```
+</div>
+
+<div class = 'marginnote plotlymargin'>
+```{r miss_outcomes_sed, fig.margin = TRUE, fig.cap = "% of Patients with Missing Outcomes, RASSes on Sedation", fig.width = 4, fig.height = 3}
+missing_outcomes_sed <- list(
+  df_discharge %>% filter(id %in% auc_sed_ids) %>% dplyr::select(dc.facility),
+  df_3m %>% filter(id %in% auc_sed_ids) %>% dplyr::select(one_of(outcome_vars)),
+  df_12m %>% filter(id %in% auc_sed_ids) %>% dplyr::select(one_of(outcome_vars))
+) %>%
+  map_df(miss_var_summary) %>%
+  separate(variable, into = c("asmt", "timept"), sep = "\\.(?=\\d+$)") %>%
+  mutate(
+    asmt = case_when(
+      asmt == "dc.facility" ~ "D/C Loc.",
+      asmt == "sf36.pcs"    ~ "PCS",
+      TRUE                  ~ toupper(asmt)
+    ),
+    asmt = fct_relevel(asmt, "D/C Loc.", after = 3L),
+    timept = case_when(
+      is.na(timept) ~ "D/C",
+      TRUE ~ paste0(timept, "M")
+    ),
+    htext = glue("{n_miss} ({round(pct_miss)}%)")
+  )
+
+## Plotly won't stay in the margin?
+plot_ly(
+  missing_outcomes_sed,
   x = ~ pct_miss,
   y = ~ asmt,
   text = ~ htext,
@@ -518,38 +612,66 @@ plot_ly(
 ## Missing Data
 
 At each time point, all patients will be included in analysis who remained alive
-and in the study. Missing data for covariates (quite minimal; detailed below)
-and outcomes will be handled using multiple imputation using predictive mean
-matching with `r n_imp` imputations, using R's `Hmisc::aregImpute()` and `rms::fit.mult.impute()` functions. Proportions of eligible patients with each
-outcome data point available are shown to the right. The maximum amount missing
-for any individual covariate at any time point is <2%. At hospital discharge, `r scales::percent(prop_miss_case(df_discharge))` of eligible patients are missing
-outcome or covariate data; at 3-month follow-up,
-`r scales::percent(prop_miss_case(df_3m))` patients; and at 12-month follow-up,
-`r scales::percent(prop_miss_case(df_12m))`. Using multiple imputation is
-particularly important for follow-up outcomes, where we suspect that the
-patients who might have the worst outcomes are most prone to missingness.
+and in the study and had at least two days of eligible RASS assessments. Missing
+data for covariates (quite minimal; detailed below) and outcomes will be handled
+using multiple imputation using predictive mean matching with `r n_imp`
+imputations, using R's `Hmisc::aregImpute()` and `rms::fit.mult.impute()` functions. Proportions of eligible patients in each cohort with each outcome
+data point available are shown to the right. The maximum amount missing
+for any individual covariate at any time point is <2%. At hospital discharge, `r scales::percent(prop_miss_case(df_discharge %>% filter(id %in% auc_total_ids)))` of patients eligible for analysis using all RASSes are missing outcome or
+covariate data; at 3-month follow-up, `r scales::percent(prop_miss_case(df_3m %>% filter(id %in% auc_total_ids)))` patients; and at 12-month follow-up,
+`r scales::percent(prop_miss_case(df_12m %>% filter(id %in% auc_total_ids)))`. Using multiple imputation is particularly important for follow-up outcomes,
+where we suspect that the patients who might have the worst outcomes are most prone to missingness.
 
 ```{r missing_data}
-df_missing <- bind_rows(
+df_missing_total <- bind_rows(
   df_discharge %>% mutate(timept = "Hospital Discharge"),
   df_3m %>% mutate(timept = "3 Months"),
   df_12m %>% mutate(timept = "12 Months")
 ) %>%
+  filter(id %in% auc_total_ids) %>%
   mutate(
     timept = forcats::fct_relevel(timept, "Hospital Discharge", "3 Months")
   ) %>%
-  dplyr::select(timept, one_of(oneobs_covars)) ## one_of(exposure_vars)
+  dplyr::select(timept, one_of(oneobs_covars), rass_auc_total)
+
+df_missing_sed <- bind_rows(
+  df_discharge %>% mutate(timept = "Hospital Discharge"),
+  df_3m %>% mutate(timept = "3 Months"),
+  df_12m %>% mutate(timept = "12 Months")
+) %>%
+  filter(id %in% auc_sed_ids) %>%
+  mutate(
+    timept = forcats::fct_relevel(timept, "Hospital Discharge", "3 Months")
+  ) %>%
+  dplyr::select(timept, one_of(oneobs_covars), rass_auc_sed)
 
 ```
 
 <details><summary>Details of Missingness among Covariates</summary>
-```{r plot_missing, fig.fullwidth = TRUE}
-miss_plot <- naniar::gg_miss_var(df_missing, timept, show_pct = TRUE) +
+
+### All RASSes
+```{r plot_missing_total, fig.fullwidth = TRUE}
+miss_plot_total <- naniar::gg_miss_var(
+  df_missing_total, timept, show_pct = TRUE
+) +
   scale_y_continuous(name = "% Missing", limits = c(0, 5)) +
   geom_hline(yintercept = 5, colour = "gray50", linetype = "dotted") +
   theme(axis.title.y = element_blank())
 
-ggplotly(miss_plot)
+ggplotly(miss_plot_total)
+
+```
+
+### RASSes while on Sedating Medication
+```{r plot_missing_sed, fig.fullwidth = TRUE}
+miss_plot_sed <- naniar::gg_miss_var(
+  df_missing_sed, timept, show_pct = TRUE
+) +
+  scale_y_continuous(name = "% Missing", limits = c(0, 5)) +
+  geom_hline(yintercept = 5, colour = "gray50", linetype = "dotted") +
+  theme(axis.title.y = element_blank())
+
+ggplotly(miss_plot_sed)
 
 ```
 
@@ -558,9 +680,8 @@ ggplotly(miss_plot)
 # Study Cohort
 
 Analyses will include all ICU survivors who were alive and remained in the study
-(ie, had not withdrawn) at the specified time point. Patients who died or
-officially withdrew from the study prior to assessment are not included in analyses at that time point. Missing data for individual assessments will be
-handled via multiple imputation.
+(ie, had not withdrawn) at the specified time point, and at least two RASS measurements meeting criteria. (If <2 RASS measurements were available, we could
+not calculate the area under a curve.) Patients who died or officially withdrew from the study prior to assessment are not included in analyses at that time point. Missing data for individual assessments will be handled via multiple imputation.
 
 ```{r print_consort}
 consort_info %>%
