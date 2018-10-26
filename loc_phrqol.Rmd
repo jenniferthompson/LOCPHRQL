@@ -829,3 +829,16 @@ model_rhs <- "rcs(age.enroll, 3) + sex.pp + race.comb + rcs(bmi, 3) + rcs(edu, 3
 ```
 
 # Activities of Daily Living
+
+# Session Info/Reproducibility
+
+Analyses above are conducted using `r R.version$version.string`, including the following add-on packages.
+
+<details><summary>Individual R Packages</summary>
+
+```{r devtools}
+devtools::session_info()$packages
+
+```
+
+</details>
