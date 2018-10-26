@@ -26,6 +26,7 @@ library(rms)
 library(naniar)
 library(plotly)
 library(MESS)
+library(JTHelpers)
 
 load("data/brainmind_deid.Rdata")
 
@@ -502,7 +503,7 @@ following hospital discharge:
     - Pfeffer Functional Activities Questionnaire (FAQ)
     - Discharge destination (home vs facility)
 - **Physical HRQOL**: Short Form-36 Physical Component Score (PCS)
-- **Mortality**: Time to death at 90 and 365 days after discharge *(THIS IS A BIG MAYBE; event rates are very low for including this # covariates)*
+- **Mortality**: Time to death within 365 days after study enrollment
 
 # Statistical Methods
 
@@ -530,13 +531,13 @@ All multivariable models will be adjusted for the following covariates:
 - Baseline and ICU admission characteristics
     - Age
     - Sex
-    - Race^[(white vs other race)]
+    - Race^[*(white vs other race)*]
     - BMI
     - Education
     - Charlson Comorbidity Index
     - CSHA Clinical Frailty Score at ICU admission
-    - Pfeffer FAQ at ICU admission
-    - Hospital type^[(civilian vs veteran)]
+    - Pfeffer FAQ at ICU admission^[*forced to be linear; approximately 60% of patients had a 0 value, so splines would be somewhat unstable due to lack of variability*]
+    - Hospital type^[*(civilian vs veteran)*]
 - Hospitalization characteristics
     - Mean daily SOFA score, modified^[*(GCS not included, as it is directly calculated from our primary exposure)*]
     - Duration of severe sepsis/septic shock
@@ -544,9 +545,8 @@ All multivariable models will be adjusted for the following covariates:
     - Hospital length of stay
 
 All continuous variables will be allowed to have a nonlinear relationship with
-the outcome, using restricted cubic splines with three knots. This results in a
-total of 23 degrees of freedom for covariates plus an additional 2df for
-exposure variables (total of 25 in each model).
+the outcome unless noted above, using restricted cubic splines with three knots.
+This results in a total of 22 degrees of freedom for covariates plus an additional 2df for exposure variables (total of 24 in each model).
 
 <div class = 'marginnote plotlymargin'>
 ```{r miss_outcomes, fig.margin = TRUE, fig.cap = "% of Patients with Missing Outcomes, All RASSes", fig.width = 4, fig.height = 3}
@@ -733,14 +733,52 @@ consort_info %>%
 ### Description of the Cohorts
 
 ```{r describe_cohort}
+## -- data.frame with variable labels to use for printing, summaries -----------
+df_dc_labels <- df_full %>%
+  filter(id %in% ids_discharge) %>%
+  mutate(
+    elig_3m = id %in% ids_3m,
+    elig_12m = id %in% ids_12m
+  )
+label(df_dc_labels$age.enroll) <- "Age at enrollment"
+label(df_dc_labels$sex.pp) <- "Sex"
+label(df_dc_labels$race.comb) <- "Race category"
+label(df_dc_labels$bmi) <- "BMI"
+label(df_dc_labels$edu) <- "Years of education"
+label(df_dc_labels$charlson.score) <- "Charlson Comorbidities Index"
+label(df_dc_labels$frailty.e) <- "Clinical Frailty Score, enrollment"
+label(df_dc_labels$adl.e) <- "Katz ADL, enrollment"
+label(df_dc_labels$faq.e) <- "FAQ, enrollment"
+label(df_dc_labels$hosp.type) <- "Hospital type"
+label(df_dc_labels$num.apache) <- "APACHE II, enrollment"
+label(df_dc_labels$sofa) <- "SOFA, enrollment"
+label(df_dc_labels$icudays.sevseptic.s) <- "Days of severe sepsis"
+label(df_dc_labels$vent.los.all) <- "Days on MV"
+label(df_dc_labels$del.s.imp) <- "Days of delirium"
+label(df_dc_labels$coma.s.imp) <- "Days of coma"
+label(df_dc_labels$delcoma.s.imp) <- "Days of delirium/coma"
+label(df_dc_labels$mean.modsofa.icu) <- "Mean modified SOFA"
+label(df_dc_labels$rass_auc_total) <- "RASS AUC, all days"
+label(df_dc_labels$rass_auc_sed) <- "RASS AUC, days on sedation"
+label(df_dc_labels$icu.los.tot) <- "ICU length of stay"
+label(df_dc_labels$hosp.los) <- "Hospital length of stay"
+label(df_dc_labels$dc.facility) <- "Discharge location"
+label(df_dc_labels$died.study.365) <- "Status, 365 days after enrollment"
+label(df_dc_labels$adl.3) <- "Katz ADL, 3m"
+label(df_dc_labels$faq.3) <- "FAQ, 3m"
+label(df_dc_labels$sf36.pcs.3) <- "SF36 PCS, 3m"
+label(df_dc_labels$adl.12) <- "Katz ADL, 12m"
+label(df_dc_labels$faq.12) <- "FAQ, 12m"
+label(df_dc_labels$sf36.pcs.12) <- "SF36 PCS, 12m"
+
 ## For now, just describe patients eligible for discharge to facility
 html(
   summaryM(
     age.enroll + sex.pp + race.comb + bmi + edu + charlson.score + frailty.e +
       adl.e + faq.e + hosp.type + num.apache + sofa + icudays.sevseptic.s +
       vent.los.all + del.s.imp + coma.s.imp + delcoma.s.imp + icu.los.tot +
-      hosp.los + dc.facility ~ 1,
-     data = subset(brainmind.oneobs, id %in% ids_discharge),
+      hosp.los + dc.facility + died.study.365 ~ 1,
+     data = df_dc_labels,
      continuous = 5
   ),
   prmsd = TRUE,
@@ -762,7 +800,7 @@ html(
       paste(str_subset(outcome_vars, "\\.3$"), collapse = " + "),
       "~ 1"
     )),
-    data = df_3m,
+    data = df_dc_labels %>% filter(elig_3m),
     continuous = 5
   ),
   prmsd = TRUE,
@@ -782,7 +820,7 @@ html(
       paste(str_subset(outcome_vars, "\\.12$"), collapse = " + "),
       "~ 1"
     )),
-    data = df_12m,
+    data = df_dc_labels %>% filter(elig_12m),
     continuous = 5
   ),
   prmsd = TRUE,
@@ -795,11 +833,14 @@ html(
 
 ```
 
-```{r model_prep}
+```{r model_prep, message = FALSE, results = "hide"}
 ## -- Multiple imputation at each time point -----------------------------------
 ## Don't bother with hospital discharge; <2% missing
+
+## Separate imputation for two exposures (also have different Ns, since not
+##   everyone was on sedation)
 set.seed(56)
-areg_3m <- aregImpute(
+areg_total_3 <- aregImpute(
   ~ sf36.pcs.3 + mean.modsofa.icu +
     icudays.sevseptic.s + bmi + rass_auc_total + age.enroll + sex.pp +
     race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
@@ -811,7 +852,19 @@ areg_3m <- aregImpute(
 )
 
 set.seed(56)
-areg_12m <- aregImpute(
+areg_sed_3 <- aregImpute(
+  ~ sf36.pcs.3 + mean.modsofa.icu +
+    icudays.sevseptic.s + bmi + rass_auc_sed + age.enroll + sex.pp +
+    race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
+    hosp.los + I(faq.3) + I(adl.3) + edu + I(faq.e),
+    ## FAQ, ADL have too many zeros/too few others to reliably allow for knots
+  data = subset(df_3m, !is.na(rass_auc_sed)),
+  nk = 3,
+  n.impute = n_imp
+)
+
+set.seed(56)
+areg_total_12 <- aregImpute(
   ~ sf36.pcs.12 + mean.modsofa.icu +
     icudays.sevseptic.s + bmi + rass_auc_total + age.enroll + sex.pp +
     race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
@@ -822,13 +875,243 @@ areg_12m <- aregImpute(
   n.impute = n_imp
 )
 
+set.seed(56)
+areg_sed_12 <- aregImpute(
+  ~ sf36.pcs.12 + mean.modsofa.icu +
+    icudays.sevseptic.s + bmi + rass_auc_sed + age.enroll + sex.pp +
+    race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
+    hosp.los + I(faq.12) + I(adl.12) + edu + I(faq.e),
+    ## FAQ, ADL have too many zeros/too few others to reliably allow for knots
+  data = subset(df_12m, !is.na(rass_auc_sed)),
+  nk = 3,
+  n.impute = n_imp
+)
+
 ## Character string for RHS of models
 ##  "rassvar" will be replaced with exposure of interest
-model_rhs <- "rcs(age.enroll, 3) + sex.pp + race.comb + rcs(bmi, 3) + rcs(edu, 3) + rcs(charlson.score, 3) + rcs(frailty.e, 3) + rcs(faq.e, 3) + hosp.type + rcs(mean.modsofa.icu, 3) + rcs(icudays.sevseptic.s, 3) + rcs(vent.los.all, 3) + rcs(hosp.los, 3) + rcs(rassvar, 3)"
+model_rhs <- "rcs(age.enroll, 3) + sex.pp + race.comb + rcs(bmi, 3) + rcs(edu, 3) + rcs(charlson.score, 3) + rcs(frailty.e, 3) + faq.e + hosp.type + rcs(mean.modsofa.icu, 3) + rcs(icudays.sevseptic.s, 3) + rcs(vent.los.all, 3) + rcs(hosp.los, 3) + rcs(rassvar, 3)"
+
+## -- Function: Replace `rassvar` w/ specific exp (eg, `rass_auc_total`) -------
+## Built to work with `model_rhs`, but should work with any character string
+##  that includes `rassvar`
+replace_rass <- function(repvar, x = model_rhs){
+  str_replace_all(x, "rassvar", repvar)
+}
+
+## Example:
+# replace_rass(repvar = "rass_auc_total")
+
+## Set up for mapping to get models, results
+## Both exposures at 3m, then both exposures at 12m
+expvars <- rep(c("rass_auc_total", "rass_auc_sed"), 2)
+timepts <- rep(c(3, 12), each = 2)
+df_list <- list(
+  df_3m, subset(df_3m, !is.na(rass_auc_sed)),
+  df_12m, subset(df_12m, !is.na(rass_auc_sed))
+)
+areg_list <- list(areg_total_3, areg_sed_3, areg_total_12, areg_sed_12)
+
+## Use same datadist (all ICU survivors) for each model
+dd <- datadist(df_discharge); options(datadist = "dd")
 
 ```
 
 # Activities of Daily Living
+
+```{r adl_distribution, fig.margin = TRUE, fig.cap = "Distribution of Katz ADL Scores", fig.width = 4, fig.height = 5}
+bind_rows(
+  df_3m %>%
+    mutate(timept = "3M") %>%
+    dplyr::select(id, timept, adl.3) %>%
+    set_names(str_remove(names(.), "\\.[0-9]+$")),
+  df_12m %>%
+    mutate(timept = "12M") %>%
+    dplyr::select(id, timept, adl.12) %>%
+    set_names(str_remove(names(.), "\\.[0-9]+$")),
+) %>%
+  mutate(timept = factor(timept, levels = c("3M", "12M"))) %>%
+  ggplot(aes(x = adl)) +
+    facet_wrap(~ timept, ncol = 1) +
+    geom_histogram() +
+    labs(
+      x = "Katz ADL Score", y = "Frequency"
+    )
+
+```
+
+After adjusting for covariates, we see a possible directional relationship
+between deeper levels of consciousness during hospitalization and higher odds of
+worse long-term disability; however, this association is weak. There are relatively ICU survivors who lack independence (scores > 0) per the Katz ADL
+*(see side)* - `r scales::percent(mean(df_3m$adl.3 == 0, na.rm = TRUE))` at 3m and `r scales::percent(mean(df_12m$adl.12 == 0, na.rm = TRUE))` at 12m have zero scores, or full independence, with the rest of the scores spread across the rest of the distribution - which makes detecting a weak association difficult.
+
+Models for this outcome were proportional odds logistic regression; the results
+shown below are the odds of a higher vs lower score on the Katz ADL for the 75th
+percentile of the AUC measurement vs the 25th percentile. Because these
+associations are nonlinear, the predicted probability plots below give a better
+overall picture. These probabilities are adjusted to the median or mode of all
+covariates, showing the probability of a higher ADL score for otherwise
+identical patients with varying AUC values.
+
+```{r models_adl, results = "hide"}
+fit_polr <- function(outcome, exposure, df, aregobj){
+  fit.mult.impute(
+    as.formula(paste(outcome, "~", replace_rass(exposure))),
+    fitter = lrm,
+    data = df,
+    xtrans = aregobj
+  )
+}
+
+models_adl <- pmap(
+  .l = list(
+    outcome = paste0("adl.", timepts),
+    exposure = expvars,
+    df = df_list,
+    aregobj = areg_list
+  ),
+  .f = fit_polr
+)
+
+## Data frames of full model results
+results_adl <- map(models_adl, rms_model_results2, labeldf = df_dc_labels) %>%
+  ## Don't want N for every single level of ADL; quick and dirty, oops
+  map(~ slice(., 1:22))
+
+## Extract odds ratios for RASS AUCs for cleaner table
+rass_est_adl <- map_df(
+  results_adl,
+  ~ filter(., str_detect(.$label, "^RASS"))
+) %>%
+  set_names(str_replace(names(.), "label", "exposure")) %>%
+  mutate(
+    timept = paste0(timepts, "M"),
+    outcome = "Katz ADL",
+    est_nums = str_remove_all(est.ci, "\\(|\\)|,"),
+    exposure = capitalize(str_remove(exposure, "^RASS AUC, "))
+  ) %>%
+  separate(
+    est_nums,
+    into = c("est", "lcl", "ucl"),
+    sep = " "
+  )
+  
+## Data frames of predicted probabilities (P("higher ADL"))
+## This loop pains me. I couldn't get map() to work on the deadline; it looked
+##  like some weirdness due to multiple things being called .x? 🤷
+pred_adl <- vector("list", length = length(models_adl))
+for(i in 1:length(pred_adl)){
+  tmp <- eval(
+    parse(
+      text = sprintf(
+        "Predict(models_adl[[i]], %s = NA, fun = plogis)", expvars[i]
+      )
+    )
+  )
+  
+  pred_adl[[i]] <- as.data.frame(tmp) %>%
+    mutate(
+      outcome = "Katz ADL",
+      exposure = expvars[i],
+      timept = timepts[i],
+      xvar = .[[expvars[i]]]
+    )
+}
+
+## Combine into a single dataset for plotting
+pred_df_adl <- bind_rows(pred_adl) %>%
+  mutate(
+    timept = factor(paste0(timept, "M"), levels = c("3M", "12M")),
+    exposure = factor(
+      ifelse(exposure == "rass_auc_sed", 1, 0),
+      levels = 0:1, labels = c("All RASSes", "RASSes on Sedating Medications")
+    )
+  )
+
+```
+
+```{r results_adl}
+kable(
+  rass_est_adl %>%
+    arrange(exposure) %>%
+    dplyr::select(timept, est.ci, pval),
+  format = "html",
+  caption = "Level of Consciousness vs Katz ADL",
+  col.names = c(
+    "Months after Discharge",
+    "Odds Ratio (95% CI), 75th vs 25th %ile",
+    "P"
+  ),
+  align = c("c", "r", "r")
+) %>%
+  group_rows(index = c("All RASSes" = 2, "RASSes while on sedation" = 2))
+
+```
+
+```{r plot_adl}
+ggplot(data = pred_df_adl) +
+  aes(x = xvar, y = yhat) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.4) +
+  geom_line() +
+  facet_grid(exposure ~ timept) +
+  scale_y_continuous(limits = 0:1) +
+  labs(
+    x = "Area Under the Curve",
+    y = "Probability of Higher ADL Score"
+  )
+
+```
+
+<details><summary>Full Model Results</summary>
+
+### AUC, All RASSes vs ADL, 3m
+
+```{r adl_total_3m}
+kable(
+  results_adl[[1]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X2", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, All RASSes vs ADL, 12m
+
+```{r adl_total_12m}
+kable(
+  results_adl[[3]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X^2^", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, RASSes on Sedating Medications vs ADL, 3m
+
+```{r adl_sed_3m}
+kable(
+  results_adl[[2]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X2", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, RASSes on Sedating Medications vs ADL, 12m
+
+```{r adl_sed_12m}
+kable(
+  results_adl[[4]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X2", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+</details>
 
 # Session Info/Reproducibility
 
@@ -837,7 +1120,9 @@ Analyses above are conducted using `r R.version$version.string`, including the f
 <details><summary>Individual R Packages</summary>
 
 ```{r devtools}
-devtools::session_info()$packages
+## Uncomment this later; it just takes up so much screen real estate in the
+##  console!
+# devtools::session_info()$packages
 
 ```
 
