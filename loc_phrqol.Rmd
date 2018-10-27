@@ -927,7 +927,7 @@ bind_rows(
   df_12m %>%
     mutate(timept = "12M") %>%
     dplyr::select(id, timept, adl.12) %>%
-    set_names(str_remove(names(.), "\\.[0-9]+$")),
+    set_names(str_remove(names(.), "\\.[0-9]+$"))
 ) %>%
   mutate(timept = factor(timept, levels = c("3M", "12M"))) %>%
   ggplot(aes(x = adl)) +
@@ -1112,11 +1112,6 @@ kable(
 ```
 
 </details>
-
-
-
-
-
 
 # Functional Activities Questionnaire
 
@@ -1307,6 +1302,198 @@ kable(
 </details>
 
 
+
+
+
+
+
+# SF36 Physical Component Score
+
+```{r pcs_distribution, fig.margin = TRUE, fig.cap = "Distribution of SF36 Physical Component Scores", fig.width = 4, fig.height = 5}
+bind_rows(
+  df_3m %>%
+    mutate(timept = "3M") %>%
+    dplyr::select(id, timept, sf36.pcs.3) %>%
+    set_names(str_remove(names(.), "\\.[0-9]+$")),
+  df_12m %>%
+    mutate(timept = "12M") %>%
+    dplyr::select(id, timept, sf36.pcs.12) %>%
+    set_names(str_remove(names(.), "\\.[0-9]+$"))
+) %>%
+  mutate(timept = factor(timept, levels = c("3M", "12M"))) %>%
+  ggplot(aes(x = sf36.pcs)) +
+    facet_wrap(~ timept, ncol = 1) +
+    geom_histogram() +
+    labs(
+      x = "SF36 PCS", y = "Frequency"
+    )
+
+```
+
+After adjusting for covariates, we see no consistent or strong relationship
+between level of consciousness and SF36 physical component scores.
+
+Models for this outcome were linear regression; the results shown below are the
+difference, on average, in SF36 physical component scores for the 75th
+percentile of the AUC measurement vs the 25th percentile. Because these
+associations are nonlinear, the marginal effects plots below give a better
+overall picture. These predictions are adjusted to the median or mode of all
+covariates, showing the predicted SF36 PCS for otherwise identical patients with
+varying AUC values.
+
+```{r models_pcs, results = "hide"}
+fit_ols <- function(outcome, exposure, df, aregobj){
+  fit.mult.impute(
+    as.formula(paste(outcome, "~", replace_rass(exposure))),
+    fitter = ols,
+    data = df,
+    xtrans = aregobj
+  )
+}
+
+models_pcs <- pmap(
+  .l = list(
+    outcome = paste0("sf36.pcs.", timepts),
+    exposure = expvars,
+    df = df_list,
+    aregobj = areg_list
+  ),
+  .f = fit_ols
+)
+
+## Data frames of full model results
+results_pcs <- map(models_pcs, rms_model_results2, labeldf = df_dc_labels)
+
+## Extract differences for RASS AUCs for cleaner table
+rass_est_pcs <- map_df(
+  results_pcs,
+  ~ filter(., str_detect(.$label, "^RASS"))
+) %>%
+  set_names(str_replace(names(.), "label", "exposure")) %>%
+  mutate(
+    timept = paste0(timepts, "M"),
+    outcome = "SF36 PCS",
+    est_nums = str_remove_all(est.ci, "\\(|\\)|,"),
+    exposure = capitalize(str_remove(exposure, "^RASS AUC, "))
+  ) %>%
+  separate(
+    est_nums,
+    into = c("est", "lcl", "ucl"),
+    sep = " "
+  )
+  
+## Data frames of predicted values
+## This loop pains me. I couldn't get map() to work on the deadline; it looked
+##  like some weirdness due to multiple things being called .x? 🤷
+pred_pcs <- vector("list", length = length(models_pcs))
+for(i in 1:length(pred_pcs)){
+  tmp <- eval(
+    parse(text = sprintf("Predict(models_pcs[[i]], %s = NA)", expvars[i]))
+  )
+  
+  pred_pcs[[i]] <- as.data.frame(tmp) %>%
+    mutate(
+      outcome = "SF36 PCS",
+      exposure = expvars[i],
+      timept = timepts[i],
+      xvar = .[[expvars[i]]]
+    )
+}
+
+## Combine into a single dataset for plotting
+pred_df_pcs <- bind_rows(pred_pcs) %>%
+  mutate(
+    timept = factor(paste0(timept, "M"), levels = c("3M", "12M")),
+    exposure = factor(
+      ifelse(exposure == "rass_auc_sed", 1, 0),
+      levels = 0:1, labels = c("All RASSes", "RASSes on Sedating Medications")
+    )
+  )
+
+```
+
+```{r results_pcs}
+kable(
+  rass_est_pcs %>%
+    arrange(exposure) %>%
+    dplyr::select(timept, est.ci, pval),
+  format = "html",
+  caption = "Level of Consciousness vs SF36 PCS",
+  col.names = c(
+    "Months after Discharge",
+    "Difference (95% CI), 75th vs 25th %ile",
+    "P"
+  ),
+  align = c("c", "r", "r")
+) %>%
+  group_rows(index = c("All RASSes" = 2, "RASSes while on sedation" = 2))
+
+```
+
+```{r plot_pcs}
+ggplot(data = pred_df_pcs) +
+  aes(x = xvar, y = yhat) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.4) +
+  geom_line() +
+  facet_grid(exposure ~ timept) +
+  labs(
+    x = "Area Under the Curve",
+    y = "Predicted Physical Component Score"
+  )
+
+```
+
+<details><summary>Full Model Results</summary>
+
+### AUC, All RASSes vs SF36 PCS, 3m
+
+```{r pcs_total_3m}
+kable(
+  results_pcs[[1]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "Diff. (95% CI)", "F", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, All RASSes vs SF36 PCS, 12m
+
+```{r pcs_total_12m}
+kable(
+  results_pcs[[3]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "Diff. (95% CI)", "F", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, RASSes on Sedating Medications vs SF36 PCS, 3m
+
+```{r pcs_sed_3m}
+kable(
+  results_pcs[[2]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "Diff. (95% CI)", "F", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, RASSes on Sedating Medications vs SF36 PCS, 12m
+
+```{r pcs_sed_12m}
+kable(
+  results_pcs[[4]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "Diff. (95% CI)", "F", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+</details>
 
 
 
