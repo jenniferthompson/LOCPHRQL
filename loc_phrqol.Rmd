@@ -941,7 +941,7 @@ bind_rows(
 
 After adjusting for covariates, we see a possible directional relationship
 between deeper levels of consciousness during hospitalization and higher odds of
-worse long-term disability; however, this association is weak. There are relatively ICU survivors who lack independence (scores > 0) per the Katz ADL
+worse long-term disability; however, this association is weak. There are relatively few ICU survivors who lack independence (scores > 0) per the Katz ADL
 *(see side)* - `r scales::percent(mean(df_3m$adl.3 == 0, na.rm = TRUE))` at 3m and `r scales::percent(mean(df_12m$adl.12 == 0, na.rm = TRUE))` at 12m have zero scores, or full independence, with the rest of the scores spread across the rest of the distribution - which makes detecting a weak association difficult.
 
 Models for this outcome were proportional odds logistic regression; the results
@@ -1112,6 +1112,205 @@ kable(
 ```
 
 </details>
+
+
+
+
+
+
+# Functional Activities Questionnaire
+
+```{r faq_distribution, fig.margin = TRUE, fig.cap = "Distribution of FAQ Scores", fig.width = 4, fig.height = 5}
+bind_rows(
+  df_3m %>%
+    mutate(timept = "3M") %>%
+    dplyr::select(id, timept, faq.3) %>%
+    set_names(str_remove(names(.), "\\.[0-9]+$")),
+  df_12m %>%
+    mutate(timept = "12M") %>%
+    dplyr::select(id, timept, faq.12) %>%
+    set_names(str_remove(names(.), "\\.[0-9]+$"))
+) %>%
+  mutate(timept = factor(timept, levels = c("3M", "12M"))) %>%
+  ggplot(aes(x = faq)) +
+    facet_wrap(~ timept, ncol = 1) +
+    geom_histogram() +
+    labs(
+      x = "FAQ Score", y = "Frequency"
+    )
+
+```
+
+After adjusting for covariates, we see a directional relationship between deeper
+levels of consciousness during hospitalization and higher odds of worse
+long-term disability; the association between total level of consciousness and
+FAQ scores at 12 months following discharge reaches statistical significance.
+
+Models for this outcome were proportional odds logistic regression; the results
+shown below are the odds of a higher vs lower score on the FAQ for the 75th
+percentile of the AUC measurement vs the 25th percentile. Because these
+associations are nonlinear, the predicted probability plots below give a better
+overall picture. These probabilities are adjusted to the median or mode of all
+covariates, showing the probability of a higher FAQ score for otherwise
+identical patients with varying AUC values.
+
+```{r models_faq, results = "hide"}
+models_faq <- pmap(
+  .l = list(
+    outcome = paste0("faq.", timepts),
+    exposure = expvars,
+    df = df_list,
+    aregobj = areg_list
+  ),
+  .f = fit_polr
+)
+
+## Data frames of full model results
+results_faq <- map(models_faq, rms_model_results2, labeldf = df_dc_labels) %>%
+  ## Don't want N for every single level of FAQ; quick and dirty, oops
+  map(~ slice(., 1:22))
+
+## Extract odds ratios for RASS AUCs for cleaner table
+rass_est_faq <- map_df(
+  results_faq,
+  ~ filter(., str_detect(.$label, "^RASS"))
+) %>%
+  set_names(str_replace(names(.), "label", "exposure")) %>%
+  mutate(
+    timept = paste0(timepts, "M"),
+    outcome = "FAQ",
+    est_nums = str_remove_all(est.ci, "\\(|\\)|,"),
+    exposure = capitalize(str_remove(exposure, "^RASS AUC, "))
+  ) %>%
+  separate(
+    est_nums,
+    into = c("est", "lcl", "ucl"),
+    sep = " "
+  )
+  
+## Data frames of predicted probabilities (P("higher FAQ"))
+## This loop pains me. I couldn't get map() to work on the deadline; it looked
+##  like some weirdness due to multiple things being called .x? 🤷
+pred_faq <- vector("list", length = length(models_faq))
+for(i in 1:length(pred_faq)){
+  tmp <- eval(
+    parse(
+      text = sprintf(
+        "Predict(models_faq[[i]], %s = NA, fun = plogis)", expvars[i]
+      )
+    )
+  )
+  
+  pred_faq[[i]] <- as.data.frame(tmp) %>%
+    mutate(
+      outcome = "FAQ",
+      exposure = expvars[i],
+      timept = timepts[i],
+      xvar = .[[expvars[i]]]
+    )
+}
+
+## Combine into a single dataset for plotting
+pred_df_faq <- bind_rows(pred_faq) %>%
+  mutate(
+    timept = factor(paste0(timept, "M"), levels = c("3M", "12M")),
+    exposure = factor(
+      ifelse(exposure == "rass_auc_sed", 1, 0),
+      levels = 0:1, labels = c("All RASSes", "RASSes on Sedating Medications")
+    )
+  )
+
+```
+
+```{r results_faq}
+kable(
+  rass_est_faq %>%
+    arrange(exposure) %>%
+    dplyr::select(timept, est.ci, pval),
+  format = "html",
+  caption = "Level of Consciousness vs FAQ",
+  col.names = c(
+    "Months after Discharge",
+    "Odds Ratio (95% CI), 75th vs 25th %ile",
+    "P"
+  ),
+  align = c("c", "r", "r")
+) %>%
+  group_rows(index = c("All RASSes" = 2, "RASSes while on sedation" = 2))
+
+```
+
+```{r plot_faq}
+ggplot(data = pred_df_faq) +
+  aes(x = xvar, y = yhat) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.4) +
+  geom_line() +
+  facet_grid(exposure ~ timept) +
+  scale_y_continuous(limits = 0:1) +
+  labs(
+    x = "Area Under the Curve",
+    y = "Probability of Higher FAQ Score"
+  )
+
+```
+
+<details><summary>Full Model Results</summary>
+
+### AUC, All RASSes vs FAQ, 3m
+
+```{r faq_total_3m}
+kable(
+  results_faq[[1]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X2", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, All RASSes vs FAQ, 12m
+
+```{r faq_total_12m}
+kable(
+  results_faq[[3]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X^2^", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, RASSes on Sedating Medications vs FAQ, 3m
+
+```{r faq_sed_3m}
+kable(
+  results_faq[[2]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X2", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, RASSes on Sedating Medications vs FAQ, 12m
+
+```{r faq_sed_12m}
+kable(
+  results_faq[[4]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X2", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+</details>
+
+
+
+
+
+
 
 # Session Info/Reproducibility
 
