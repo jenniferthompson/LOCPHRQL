@@ -887,9 +887,36 @@ areg_sed_12 <- aregImpute(
   n.impute = n_imp
 )
 
+set.seed(56)
+areg_total_death <- aregImpute(
+  ~ sf36.pcs.3 + sf36.pcs.12 + mean.modsofa.icu +
+    icudays.sevseptic.s + bmi + rass_auc_total + age.enroll + sex.pp +
+    race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
+    hosp.los + I(faq.3) + I(adl.3) + edu + I(faq.e) + I(faq.12) + I(adl.12),
+    ## FAQ, ADL have too many zeros/too few others to reliably allow for knots
+  data = df_full %>% filter(id %in% ids_discharge),
+  nk = 3,
+  n.impute = n_imp
+)
+
+set.seed(56)
+areg_sed_death <- aregImpute(
+  ~ sf36.pcs.3 + sf36.pcs.12 + mean.modsofa.icu +
+    icudays.sevseptic.s + bmi + rass_auc_sed + age.enroll + sex.pp +
+    race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
+    hosp.los + I(faq.3) + I(adl.3) + edu + I(faq.e) + I(faq.12) + I(adl.12),
+    ## FAQ, ADL have too many zeros/too few others to reliably allow for knots
+  data = df_full %>% filter(id %in% ids_discharge & !is.na(rass_auc_sed)),
+  nk = 3,
+  n.impute = n_imp
+)
+
 ## Character string for RHS of models
 ##  "rassvar" will be replaced with exposure of interest
 model_rhs <- "rcs(age.enroll, 3) + sex.pp + race.comb + rcs(bmi, 3) + rcs(edu, 3) + rcs(charlson.score, 3) + rcs(frailty.e, 3) + faq.e + hosp.type + rcs(mean.modsofa.icu, 3) + rcs(icudays.sevseptic.s, 3) + rcs(vent.los.all, 3) + rcs(hosp.los, 3) + rcs(rassvar, 3)"
+
+##  12m mortality doesn't have enough events to support all these splines
+model_death_rhs <- "rcs(age.enroll, 3) + sex.pp + race.comb + bmi + edu + charlson.score + frailty.e + faq.e + hosp.type + mean.modsofa.icu + icudays.sevseptic.s + vent.los.all + hosp.los + rcs(rassvar, 3)"
 
 ## -- Function: Replace `rassvar` w/ specific exp (eg, `rass_auc_total`) -------
 ## Built to work with `model_rhs`, but should work with any character string
@@ -1301,12 +1328,6 @@ kable(
 
 </details>
 
-
-
-
-
-
-
 # SF36 Physical Component Score
 
 ```{r pcs_distribution, fig.margin = TRUE, fig.cap = "Distribution of SF36 Physical Component Scores", fig.width = 4, fig.height = 5}
@@ -1495,9 +1516,150 @@ kable(
 
 </details>
 
+# 12-Month Mortality
 
+After adjusting for covariates^[*NOTE: Due to the number of deaths, we were unable to include nonlinear terms in these models for covariates other than LOC and age*], we see no meaningful relationship between deeper levels of consciousness during hospitalization and rate of mortality within 12
+months of study enrollment.
 
+Models for this outcome were Cox proportional hazards regression; the results
+shown below are the ratio of hazard of death at a given time point for the 75th
+percentile of the AUC measurement vs the 25th percentile.
 
+```{r models_death, results = "hide"}
+fit_cph <- function(outcome, exposure, df, aregobj){
+  fit.mult.impute(
+    as.formula(paste(outcome, "~", replace_rass(exposure, model_death_rhs))),
+    fitter = cph,
+    data = df,
+    xtrans = aregobj
+  )
+}
+
+## Create Surv objects
+surv_all <- with(subset(df_full, id %in% ids_discharge), {
+  Surv(
+    time = days.deathlast.365,
+    event = (died.study.365 == "Died during first 365 days")
+  )
+})
+
+surv_sed <-
+  with(subset(df_full, id %in% ids_discharge & !is.na(rass_auc_sed)), {
+    Surv(
+      time = days.deathlast.365,
+      event = (died.study.365 == "Died during first 365 days")
+    )
+  })
+
+models_death <- pmap(
+  .l = list(
+    outcome = c("surv_all", "surv_sed"),
+    exposure = expvars[1:2],
+    df = list(
+      df_full %>% filter(id %in% ids_discharge),
+      df_full %>% filter(id %in% ids_discharge & !is.na(rass_auc_sed))
+    ),
+    aregobj = list(areg_total_death, areg_sed_death)
+  ),
+  .f = fit_cph
+)
+
+## Data frames of full model results
+results_death <- map(models_death, rms_model_results2, labeldf = df_dc_labels)
+
+## Extract odds ratios for RASS AUCs for cleaner table
+rass_est_death <- map_df(
+  results_death,
+  ~ filter(., str_detect(.$label, "^RASS"))
+) %>%
+  set_names(str_replace(names(.), "label", "exposure")) %>%
+  mutate(
+    outcome = "12m Death",
+    est_nums = str_remove_all(est.ci, "\\(|\\)|,"),
+    exposure = capitalize(str_remove(exposure, "^RASS AUC, "))
+  ) %>%
+  separate(
+    est_nums,
+    into = c("est", "lcl", "ucl"),
+    sep = " "
+  )
+
+## Doesn't really make sense for Cox models  
+# ## Data frames of predicted probabilities (P("higher ADL"))
+# ## This loop pains me. I couldn't get map() to work on the deadline; it looked
+# ##  like some weirdness due to multiple things being called .x? 🤷
+# pred_adl <- vector("list", length = length(models_adl))
+# for(i in 1:length(pred_adl)){
+#   tmp <- eval(
+#     parse(
+#       text = sprintf(
+#         "Predict(models_adl[[i]], %s = NA, fun = plogis)", expvars[i]
+#       )
+#     )
+#   )
+#   
+#   pred_adl[[i]] <- as.data.frame(tmp) %>%
+#     mutate(
+#       outcome = "Katz ADL",
+#       exposure = expvars[i],
+#       timept = timepts[i],
+#       xvar = .[[expvars[i]]]
+#     )
+# }
+# 
+# ## Combine into a single dataset for plotting
+# pred_df_adl <- bind_rows(pred_adl) %>%
+#   mutate(
+#     timept = factor(paste0(timept, "M"), levels = c("3M", "12M")),
+#     exposure = factor(
+#       ifelse(exposure == "rass_auc_sed", 1, 0),
+#       levels = 0:1, labels = c("All RASSes", "RASSes on Sedating Medications")
+#     )
+#   )
+
+```
+
+```{r results_death}
+kable(
+  rass_est_death %>%
+    arrange(exposure) %>%
+    dplyr::select(est.ci, pval),
+  format = "html",
+  caption = "Level of Consciousness vs 12M Mortality",
+  col.names = c("Hazard Ratio (95% CI), 75th vs 25th %ile", "P"),
+  align = c("r", "r")
+) %>%
+  group_rows(index = c("All RASSes" = 1, "RASSes while on sedation" = 1))
+
+```
+
+<details><summary>Full Model Results</summary>
+
+### AUC, All RASSes vs Death, 12m
+
+```{r death_total_12m}
+kable(
+  results_death[[1]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "HR (95% CI)", "X^2^", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+### AUC, RASSes on Sedating Medications vs Death, 12m
+
+```{r death_sed_12m}
+kable(
+  results_death[[2]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "HR (95% CI)", "X2", "df", "P"),
+  align = c("l", rep("r", ncol(results_adl[[1]]) - 1))
+)
+
+```
+
+</details>
 
 # Session Info/Reproducibility
 
@@ -1508,7 +1670,7 @@ Analyses above are conducted using `r R.version$version.string`, including the f
 ```{r devtools}
 ## Uncomment this later; it just takes up so much screen real estate in the
 ##  console!
-# devtools::session_info()$packages
+devtools::session_info()$packages
 
 ```
 
