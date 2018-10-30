@@ -911,6 +911,30 @@ areg_sed_death <- aregImpute(
   n.impute = n_imp
 )
 
+set.seed(56)
+areg_total_dcloc <- aregImpute(
+  ~ sf36.pcs.3 + sf36.pcs.12 + mean.modsofa.icu + dc.facility +
+    icudays.sevseptic.s + bmi + rass_auc_total + age.enroll + sex.pp +
+    race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
+    hosp.los + I(faq.3) + I(adl.3) + edu + I(faq.e) + I(faq.12) + I(adl.12),
+    ## FAQ, ADL have too many zeros/too few others to reliably allow for knots
+  data = df_full %>% filter(id %in% ids_discharge),
+  nk = 3,
+  n.impute = n_imp
+)
+
+set.seed(56)
+areg_sed_dcloc <- aregImpute(
+  ~ sf36.pcs.3 + sf36.pcs.12 + mean.modsofa.icu + dc.facility +
+    icudays.sevseptic.s + bmi + rass_auc_sed + age.enroll + sex.pp +
+    race.comb + charlson.score + frailty.e + hosp.type + vent.los.all +
+    hosp.los + I(faq.3) + I(adl.3) + edu + I(faq.e) + I(faq.12) + I(adl.12),
+    ## FAQ, ADL have too many zeros/too few others to reliably allow for knots
+  data = df_full %>% filter(id %in% ids_discharge & !is.na(rass_auc_sed)),
+  nk = 3,
+  n.impute = n_imp
+)
+
 ## Character string for RHS of models
 ##  "rassvar" will be replaced with exposure of interest
 model_rhs <- "rcs(age.enroll, 3) + sex.pp + race.comb + rcs(bmi, 3) + rcs(edu, 3) + rcs(charlson.score, 3) + rcs(frailty.e, 3) + faq.e + hosp.type + rcs(mean.modsofa.icu, 3) + rcs(icudays.sevseptic.s, 3) + rcs(vent.los.all, 3) + rcs(hosp.los, 3) + rcs(rassvar, 3)"
@@ -940,6 +964,160 @@ areg_list <- list(areg_total_3, areg_sed_3, areg_total_12, areg_sed_12)
 
 ## Use same datadist (all ICU survivors) for each model
 dd <- datadist(df_discharge); options(datadist = "dd")
+
+```
+
+# Discharge Location
+
+```{r dcloc_distribution, fig.margin = TRUE, fig.cap = "Distribution of Discharge Locations", fig.width = 4, fig.height = 5}
+ggplot(data = df_discharge, aes(x = dc.facility)) +
+  geom_bar() +
+  labs(
+    x = "Discharge Location", y = "Frequency"
+  )
+
+```
+
+After adjusting for covariates, we see a possible directional relationship
+between deeper levels of consciousness during hospitalization and higher odds of
+worse long-term disability; however, this association is weak. There are relatively few ICU survivors who lack independence (scores > 0) per the Katz ADL
+*(see side)* - `r scales::percent(mean(df_3m$adl.3 == 0, na.rm = TRUE))` at 3m and `r scales::percent(mean(df_12m$adl.12 == 0, na.rm = TRUE))` at 12m have zero scores, or full independence, with the rest of the scores spread across the rest of the distribution - which makes detecting a weak association difficult.
+
+Models for this outcome were proportional odds logistic regression; the results
+shown below are the odds of a higher vs lower score on the Katz ADL for the 75th
+percentile of the AUC measurement vs the 25th percentile. Because these
+associations are nonlinear, the predicted probability plots below give a better
+overall picture. These probabilities are adjusted to the median or mode of all
+covariates, showing the probability of a higher ADL score for otherwise
+identical patients with varying AUC values.
+
+```{r models_dcloc, results = "hide"}
+fit_polr <- function(outcome, exposure, df, aregobj){
+  fit.mult.impute(
+    as.formula(paste(outcome, "~", replace_rass(exposure))),
+    fitter = lrm,
+    data = df,
+    xtrans = aregobj
+  )
+}
+
+models_dcloc <- pmap(
+  .l = list(
+    outcome = rep("dc.facility", 2),
+    exposure = expvars[1:2],
+    df = list(
+      df_full %>% filter(id %in% ids_discharge),
+      df_full %>% filter(id %in% ids_discharge & !is.na(rass_auc_sed))
+    ),
+    aregobj = list(areg_total_dcloc, areg_sed_dcloc)
+  ),
+  .f = fit_polr
+)
+
+## Data frames of full model results
+results_dcloc <- map(models_dcloc, rms_model_results2, labeldf = df_dc_labels)
+
+## Extract odds ratios for RASS AUCs for cleaner table
+rass_est_dcloc <- map_df(
+  results_dcloc,
+  ~ filter(., str_detect(.$label, "^RASS"))
+) %>%
+  set_names(str_replace(names(.), "label", "exposure")) %>%
+  mutate(
+    outcome = "Discharge Location",
+    est_nums = str_remove_all(est.ci, "\\(|\\)|,"),
+    exposure = capitalize(str_remove(exposure, "^RASS AUC, "))
+  ) %>%
+  separate(
+    est_nums,
+    into = c("est", "lcl", "ucl"),
+    sep = " "
+  )
+  
+## Data frames of predicted probabilities (P("higher ADL"))
+## This loop pains me. I couldn't get map() to work on the deadline; it looked
+##  like some weirdness due to multiple things being called .x? 🤷
+pred_dcloc <- vector("list", length = length(models_dcloc))
+for(i in 1:length(pred_dcloc)){
+  tmp <- eval(
+    parse(
+      text = sprintf(
+        "Predict(models_dcloc[[i]], %s = NA, fun = plogis)", expvars[i]
+      )
+    )
+  )
+  
+  pred_dcloc[[i]] <- as.data.frame(tmp) %>%
+    mutate(
+      outcome = "Discharge Location",
+      exposure = expvars[i],
+      timept = timepts[i],
+      xvar = .[[expvars[i]]]
+    )
+}
+
+## Combine into a single dataset for plotting
+pred_df_dcloc <- bind_rows(pred_dcloc) %>%
+  mutate(
+    exposure = factor(
+      ifelse(exposure == "rass_auc_sed", 1, 0),
+      levels = 0:1, labels = c("All RASSes", "RASSes on Sedating Medications")
+    )
+  )
+
+```
+
+```{r results_dcloc}
+kable(
+  rass_est_dcloc %>%
+    arrange(exposure) %>%
+    dplyr::select(est.ci, pval),
+  format = "html",
+  caption = "Level of Consciousness vs Discharge to Facility",
+  col.names = c("Odds Ratio (95% CI), 75th vs 25th %ile", "P"),
+  align = c("r", "r")
+) %>%
+  group_rows(index = c("All RASSes" = 1, "RASSes while on sedation" = 1))
+
+```
+
+```{r plot_dcloc}
+ggplot(data = pred_df_dcloc) +
+  aes(x = xvar, y = yhat) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.4) +
+  geom_line() +
+  facet_wrap(~ exposure, nrow = 1) +
+  scale_y_continuous(limits = 0:1) +
+  labs(
+    x = "Area Under the Curve",
+    y = "Probability of Discharge to Facility"
+  )
+
+```
+
+<details><summary>Full Model Results</summary>
+
+### AUC, All RASSes vs Discharge Location
+
+```{r dcloc_total}
+kable(
+  results_dcloc[[1]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X2", "df", "P"),
+  align = c("l", rep("r", ncol(results_dcloc[[1]]) - 1))
+)
+
+```
+
+### AUC, RASSes on Sedating Medications vs Discharge Location
+
+```{r dcloc_sed}
+kable(
+  results_dcloc[[2]],
+  format = "html",
+  col.names = c("Covariate", "Ref.", "Comp.", "OR (95% CI)", "X2", "df", "P"),
+  align = c("l", rep("r", ncol(results_dcloc[[1]]) - 1))
+)
 
 ```
 
