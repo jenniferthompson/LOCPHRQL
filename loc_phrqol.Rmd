@@ -549,7 +549,8 @@ the outcome unless noted above, using restricted cubic splines with three knots.
 This results in a total of 22 degrees of freedom for covariates plus an additional 2df for exposure variables (total of 24 in each model).
 
 All model point estimates compare the 75th percentile of RASS AUC to the 25th
-percentile. For AUCs including all RASSes, these values are `r paste(quantile(df_discharge$rass_auc_total, probs = c(0.75, 0.25), na.rm = TRUE), collapse = " vs ")`; for AUCs including only RASSes on sedation, they are `r paste(quantile(df_discharge$rass_auc_sed, probs = c(0.75, 0.25), na.rm = TRUE), collapse = " vs ")`.
+percentile among our population of ICU survivors. For AUCs including all RASSes,
+these values are `r paste(quantile(df_discharge$rass_auc_total, probs = c(0.75, 0.25), na.rm = TRUE), collapse = " vs ")`; for AUCs including only RASSes on sedation, they are `r paste(quantile(df_discharge$rass_auc_sed, probs = c(0.75, 0.25), na.rm = TRUE), collapse = " vs ")`.
 
 <div class = 'marginnote plotlymargin'>
 ```{r miss_outcomes, fig.margin = TRUE, fig.cap = "% of Patients with Missing Outcomes, All RASSes", fig.width = 4, fig.height = 3}
