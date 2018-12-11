@@ -780,8 +780,8 @@ html(
   summaryM(
     age.enroll + sex.pp + race.comb + bmi + edu + charlson.score + frailty.e +
       adl.e + faq.e + hosp.type + num.apache + sofa + icudays.sevseptic.s +
-      vent.los.all + del.s.imp + coma.s.imp + delcoma.s.imp + icu.los.tot +
-      hosp.los + dc.facility + died.study.365 ~ 1,
+      vent.los.all + del.s.imp + coma.s.imp + delcoma.s.imp + rass_auc_total +
+      rass_auc_sed + icu.los.tot + hosp.los + dc.facility + died.study.365 ~ 1,
      data = df_dc_labels,
      continuous = 5
   ),
@@ -1842,6 +1842,106 @@ kable(
 ```
 
 </details>
+
+# Description of Primary Exposure
+
+We want to describe our primary exposures (AUCs for total and
+sedative-associated RASS); as an AUC of "6" has no obvious clinical meaning,
+these descriptive statistics primarily serve to denote the amount of variability
+among our cohort in these measures. For a more concrete clinical connection, we
+also show daily RASSes for a random sample of patients at our 25th, 50th, and
+75th percentiles of total RASS AUC, to give a sense of the hospital course for
+patients with these AUCs.
+
+## Summary Statistics, Patients Included in Any Models
+
+```{r auc_summary}
+## -- Describe two primary exposures -------------------------------------------
+html(
+  summaryM(rass_auc_total + rass_auc_sed ~ 1, data = df_discharge),
+  prmsd = TRUE,
+  digits = 2
+)
+
+```
+
+```{r auc_sumplots}
+auc_plotdata <- df_discharge %>%
+  dplyr::select(starts_with("rass_auc")) %>%
+  gather(key = auc_type, value = auc_value) %>%
+  mutate(
+    auc_type = factor(
+      ifelse(auc_type == "rass_auc_sed", 2, 1),
+      levels = 1:2, labels = c("All RASS", "Sedative-Associated RASS")
+    )
+  )
+
+## Histograms
+auc_plotdata %>%
+  ggplot() +
+  aes(x = auc_value) +
+  facet_wrap(~ auc_type) +
+  geom_histogram(fill = "#003D74") +
+  labs(
+    x = "AUC (Primary Exposure)", y = "Count"
+  ) +
+  theme_bw()
+
+ggsave(
+  "auc_histograms", device = "pdf", path = "pubfigures", width = 6, height = 4,
+  units = "in"
+)
+
+## Boxplots
+auc_plotdata %>%
+  ggplot() +
+  aes(y = auc_value) +
+  facet_wrap(~ auc_type) +
+  geom_boxplot(fill = "#003D74", alpha = 0.5, outlier.colour = "#003D74") +
+  labs(
+    y = "AUC (Primary Exposure)"
+  ) +
+  theme_bw() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+ggsave(
+  "auc_boxplots", device = "pdf", path = "pubfigures", width = 6, height = 4,
+  units = "in"
+)
+
+```
+
+```{r auc_indplots}
+## -- Take sample of 3 patients each with 25th, 50th, 75th %ile total AUC ------
+pts_25 <- subset(
+  df_discharge,
+  rass_auc_total ==
+    quantile(df_discharge$rass_auc_total, probs = 0.25, na.rm = TRUE)
+)
+
+set.seed(56)
+ggplot(
+  data = subset(
+    rass_for_auc,
+    id %in% sample(pts_25$id, size = 3)
+  ) %>%
+    mutate(
+      rass_dist_total = ifelse(rass_dist_total == 0, 0.05, rass_dist_total)
+    )
+) +
+  aes(x = study.day, y = rass_dist_total) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ id, scales = "free_x") +
+  scale_x_continuous(breaks = seq(1, 100, 1), name = "Study Day") +
+  scale_y_continuous(limits = c(0, 5), breaks = 0:5, labels = paste0("-", 0:5), name = "Lowest RASS") +
+  labs(title = "Sample, Patients at 25th %ile of Exposure")
+
+```
 
 # Session Info/Reproducibility
 
